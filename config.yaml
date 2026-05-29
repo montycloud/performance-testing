@@ -1,0 +1,56 @@
+global:
+  prefix: mc-perftest-stg
+  region: us-east-1
+  s3_bucket: mc-performance-mh-stg
+resources:
+  sns_topic:
+    enabled: true
+    count: 7200
+  sqs_queue:
+    enabled: true
+    count: 9000
+  s3_bucket:
+    enabled: true
+    count: 80
+  lambda_function:
+    enabled: true
+    count: 900
+  dynamodb_table:
+    enabled: true
+    count: 0
+  auto_scaling_group:
+    enabled: true
+    count: 0
+  vpc:
+    enabled: true
+    count: 1
+  subnet:
+    enabled: true
+    count: 1
+  security_group:
+    enabled: true
+    count: 0
+  route_table:
+    enabled: true
+    count: 0
+  internet_gateway:
+    enabled: true
+    count: 0
+  vpc_peering_connection:
+    enabled: true
+    count: 0
+  network_acl:
+    enabled: true
+    count: 0
+  target_group:
+    enabled: true
+    count: 0
+  iam_policy:
+    enabled: true
+    count: 500
+  iam_role:
+    enabled: true
+    count: 500
+  iam_user:
+    enabled: true
+    count: 1000
