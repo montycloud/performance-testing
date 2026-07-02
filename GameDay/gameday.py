@@ -27,6 +27,7 @@ import logging
 import os
 import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
@@ -35,6 +36,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import boto3
 import requests
 import yaml
+from botocore.exceptions import ClientError
 from dotenv import load_dotenv
 
 # ---------------------------------------------------------------------------
@@ -129,6 +131,14 @@ TENANT_FEATURE = "AutomatedCloudOps"
 _api_key_cfg: Dict[str, Any] = _cfg.get("api_key", {})
 API_KEY_NAME: str = str(_api_key_cfg.get("name", "APIKey"))
 API_KEY_EXPIRY_DAYS: int = int(_api_key_cfg.get("expiry_days", 90))
+
+# Cognito auto-confirmation configuration (Step 2)
+_cognito_cfg: Dict[str, Any] = _cfg.get("cognito", {})
+COGNITO_ENABLED: bool = bool(_cognito_cfg.get("enabled", False))
+COGNITO_USER_POOL_ID: str = str(_cognito_cfg.get("user_pool_id", "")).strip()
+COGNITO_REGION: str = str(_cognito_cfg.get("region", "us-east-1"))
+COGNITO_PROFILE: str = str(_cognito_cfg.get("profile", "")).strip()
+COGNITO_CONFIRM_WAIT_SECONDS: int = int(_cognito_cfg.get("confirm_wait_seconds", 5))
 
 # ---------------------------------------------------------------------------
 # CSV column names
@@ -241,6 +251,44 @@ def step_signup(row: Dict[str, str], dry_run: bool = False) -> None:
     }
     _post("/auth/signup", payload, dry_run=dry_run)
     logger.info("[%s] Signup complete", row[COL_ROOT_EMAIL])
+
+
+def step_confirm_user(email: str, dry_run: bool = False) -> str:
+    """Step 2 — Auto-confirm a root user via Cognito Admin API.
+
+    Calls admin_confirm_sign_up + admin_update_user_attributes (email_verified).
+    Returns one of: "SUCCESS", "ALREADY_CONFIRMED", or raises on hard failure.
+    """
+    if dry_run:
+        logger.info(
+            "[DRY-RUN] Cognito admin_confirm_sign_up UserPoolId=%s Username=%s",
+            COGNITO_USER_POOL_ID,
+            email,
+        )
+        return "SUCCESS"
+
+    session = boto3.Session(
+        profile_name=COGNITO_PROFILE or None,
+        region_name=COGNITO_REGION,
+    )
+    client = session.client("cognito-idp")
+
+    try:
+        client.admin_confirm_sign_up(UserPoolId=COGNITO_USER_POOL_ID, Username=email)
+        client.admin_update_user_attributes(
+            UserPoolId=COGNITO_USER_POOL_ID,
+            Username=email,
+            UserAttributes=[{"Name": "email_verified", "Value": "true"}],
+        )
+        logger.info("[%s] Cognito confirmation complete", email)
+        return "SUCCESS"
+    except ClientError as exc:
+        code = exc.response["Error"]["Code"]
+        msg = exc.response["Error"]["Message"]
+        if code == "NotAuthorizedException" and "already confirmed" in msg.lower():
+            logger.info("[%s] Already confirmed — skipping", email)
+            return "ALREADY_CONFIRMED"
+        raise
 
 
 def step_signin_root(row: Dict[str, str], dry_run: bool = False) -> Tuple[str, str, str]:
@@ -709,25 +757,74 @@ def cmd_create_users(args: argparse.Namespace) -> None:
             logger.warning("No successful signups in batch %d; skipping.", batch_num)
             continue
 
-        # --- Manual gate: email verification ---
-        if not dry_run:
-            print(
-                f"\n{'='*60}\n"
-                f"  MANUAL STEP REQUIRED — Batch {batch_num}\n"
-                f"{'='*60}\n"
-                f"  {len(signup_ok)} user(s) just signed up:\n"
+        # --- Step 2: Email verification (auto via Cognito, or manual fallback) ---
+        if COGNITO_ENABLED and COGNITO_USER_POOL_ID:
+            logger.info(
+                "Step 2: Auto-confirming %d user(s) via Cognito (batch %d)...",
+                len(signup_ok),
+                batch_num,
             )
-            for _, row in signup_ok:
-                print(f"    • {row[COL_ROOT_EMAIL]}")
-            print(
-                "\n  Please verify their email addresses in the MontyCloud\n"
-                "  console or via the verification emails, then press Enter\n"
-                "  to continue with the rest of the provisioning steps.\n"
-            )
-            input("  Press Enter when email verification is complete > ")
-            print()
+            confirm_failed: List[str] = []
+            confirm_futures: Dict = {}
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                for idx, row in signup_ok:
+                    fut = pool.submit(step_confirm_user, row[COL_ROOT_EMAIL], dry_run)
+                    confirm_futures[fut] = (idx, row)
+                for fut in as_completed(confirm_futures):
+                    idx, row = confirm_futures[fut]
+                    try:
+                        fut.result()
+                    except Exception as exc:
+                        logger.error(
+                            "[%s] Cognito auto-confirm failed: %s", row[COL_ROOT_EMAIL], exc
+                        )
+                        confirm_failed.append(row[COL_ROOT_EMAIL])
+
+            if confirm_failed and not dry_run:
+                # Fall back to manual gate for the users that could not be auto-confirmed
+                print(
+                    f"\n{'='*60}\n"
+                    f"  MANUAL STEP REQUIRED — Batch {batch_num}\n"
+                    f"  (auto-confirmation failed for {len(confirm_failed)} user(s))\n"
+                    f"{'='*60}\n"
+                )
+                for email in confirm_failed:
+                    print(f"    • {email}")
+                print(
+                    "\n  Please verify the above email addresses manually in the\n"
+                    "  MontyCloud console, then press Enter to continue.\n"
+                )
+                input("  Press Enter when email verification is complete > ")
+                print()
+
+            # Wait for Cognito to propagate before proceeding
+            if not dry_run and COGNITO_CONFIRM_WAIT_SECONDS > 0:
+                logger.info(
+                    "Waiting %ds for Cognito to propagate...", COGNITO_CONFIRM_WAIT_SECONDS
+                )
+                time.sleep(COGNITO_CONFIRM_WAIT_SECONDS)
         else:
-            logger.info("[DRY-RUN] Skipping email verification gate for batch %d", batch_num)
+            # Cognito not configured — use manual verification gate
+            if not dry_run:
+                print(
+                    f"\n{'='*60}\n"
+                    f"  MANUAL STEP REQUIRED — Batch {batch_num}\n"
+                    f"{'='*60}\n"
+                    f"  {len(signup_ok)} user(s) just signed up:\n"
+                )
+                for _, row in signup_ok:
+                    print(f"    • {row[COL_ROOT_EMAIL]}")
+                print(
+                    "\n  Please verify their email addresses in the MontyCloud\n"
+                    "  console or via the verification emails, then press Enter\n"
+                    "  to continue with the rest of the provisioning steps.\n"
+                )
+                input("  Press Enter when email verification is complete > ")
+                print()
+            else:
+                logger.info(
+                    "[DRY-RUN] Skipping email verification gate for batch %d", batch_num
+                )
 
         # --- Steps 3–9 + tenants: Parallel provisioning after verification ---
         logger.info(

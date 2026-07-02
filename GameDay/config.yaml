@@ -27,3 +27,10 @@ lambda:
 api_key:
   name: "APIKey"        # Name field in the API key creation payload
   expiry_days: 90       # ExpiryDays field in the payload
+
+cognito:
+  enabled: true
+  user_pool_id: "us-east-1_OQq45Tp18"   # Cognito User Pool ID for email auto-confirmation
+  region: "us-east-1"
+  profile: "default"                         # AWS named profile; blank = default credential chain
+  confirm_wait_seconds: 5                 # seconds to sleep after batch confirmation before provisioning
