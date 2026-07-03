@@ -12,12 +12,13 @@ users:
   parallel_workers: 10          # max root users provisioned in parallel; override with --workers
   root_designation: "Business Analyst"  # Designation field in every root user signup payload
   csv_file: "sample_users.csv"  # default input CSV; override with --csv
+  create_child_user: false       # set to true to run steps 7-9 (child user creation + password reset)
 
 lambda:
   enabled: true
   function_name: "publish-platform-events-dev1-publish_platform_events"
   region: "us-east-1"
-  profile: "dev1"               # AWS named profile to use; leave blank to use default credential chain
+  profile: "default"               # AWS named profile to use; leave blank to use default credential chain
   enabled_features:
     MTEnabled: true
     FBPEnabled: true

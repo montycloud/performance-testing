@@ -98,6 +98,7 @@ MC_DEBUG_MODE: bool = bool(_cfg["api"]["mc_debug_mode"])
 PARALLEL_WORKERS: int = int(_cfg["users"]["parallel_workers"])
 ROOT_DESIGNATION: str = _cfg["users"]["root_designation"]
 _DEFAULT_CSV: str = _cfg["users"]["csv_file"]
+CREATE_CHILD_USER: bool = bool(_cfg["users"].get("create_child_user", False))
 
 # The captcha token is the only secret — name of its env var is in config.yaml
 CAPTCHA_CODE: str = _require_env(_cfg["api"]["captcha_code_env_var"])
@@ -151,13 +152,14 @@ COL_MSP_ORG = "MSP Org Name"
 COL_ROOT_PASSWORD = "Root Password"
 COL_CHILD_EMAIL = "Child Email"
 COL_CHILD_NAME = "Child Name"
+COL_ROOT_NEW_PASSWORD = "Root New Password"  # proposed password used in change-password step
 COL_CHILD_PASSWORD = "Child Password"       # initial temp password used at creation
 COL_CHILD_NEW_PASSWORD = "Child New Password"  # permanent password set via reset_temp_password
 COL_TENANT1_NAME = "Child Tenant 1 Name"
 COL_TENANT2_NAME = "Child Tenant 2 Name"
 
 REQUIRED_COLUMNS = [
-    COL_ROOT_EMAIL, COL_ROOT_NAME, COL_MSP_ORG, COL_ROOT_PASSWORD,
+    COL_ROOT_EMAIL, COL_ROOT_NAME, COL_MSP_ORG, COL_ROOT_PASSWORD, COL_ROOT_NEW_PASSWORD,
     COL_CHILD_EMAIL, COL_CHILD_NAME, COL_CHILD_PASSWORD, COL_CHILD_NEW_PASSWORD,
     COL_TENANT1_NAME, COL_TENANT2_NAME,
 ]
@@ -235,7 +237,52 @@ def _post(
 
 # ---------------------------------------------------------------------------
 # API step functions
+def _get(
+    path: str,
+    token: Optional[str] = None,
+    dry_run: bool = False,
+) -> Dict[str, Any]:
+    """GET BASE_URL/path with optional Bearer token. Returns parsed JSON."""
+    url = f"{BASE_URL}{path}"
+    headers: Dict[str, str] = {"Content-Type": "application/json"}
+    if token:
+        headers["authorization"] = token
+
+    if dry_run:
+        logger.info("[DRY-RUN] GET %s", url)
+        return {}
+
+    logger.debug("GET %s", url)
+    resp = _session.get(url, headers=headers, timeout=30)
+    try:
+        resp.raise_for_status()
+    except requests.HTTPError:
+        body = resp.text[:500]
+        raise requests.HTTPError(
+            f"GET {url} returned {resp.status_code}: {body}",
+            response=resp,
+        )
+    return resp.json() if resp.text.strip() else {}
+
+
 # ---------------------------------------------------------------------------
+
+
+def step_get_user_details(token: str, dry_run: bool = False) -> str:
+    """GET /auth/user — fetch the current root user's profile and return their UserId.
+
+    The UserId is required as the Owner field when creating tenants.
+    """
+    if dry_run:
+        logger.info("[DRY-RUN] GET %s/auth/user", BASE_URL)
+        return "DRY_RUN_USER_ID"
+
+    data = _get("/auth/user", token=token)
+    user_id = data.get("UserId", "")
+    if not user_id:
+        raise ValueError("GET /auth/user returned no UserId")
+    logger.debug("Resolved UserId: %s", user_id)
+    return user_id
 
 
 def step_signup(row: Dict[str, str], dry_run: bool = False) -> None:
@@ -347,7 +394,7 @@ def step_change_password(
     """Step 4 — Change root user password."""
     payload = {
         "PreviousPassword": row[COL_ROOT_PASSWORD],
-        "ProposedPassword": row[COL_ROOT_PASSWORD],  # same password kept; update CSV if rotation needed
+        "ProposedPassword": row[COL_ROOT_NEW_PASSWORD],
         "AccessToken": access_token,
         "UserEmail": row[COL_ROOT_EMAIL],
     }
@@ -567,15 +614,14 @@ def provision_user(
         # Step 6: Support request
         step_submit_support_request(row, token, dry_run=dry_run)
 
-        # Step 7: Create child user
-        child_user_id = step_create_child_user(row, token, org_id, dry_run=dry_run)
-        result[COL_CHILD_USER_ID] = child_user_id
-
-        # Step 8: Sign in child to get session
-        session = step_signin_child(row, dry_run=dry_run)
-
-        # Step 9: Reset child password
-        step_reset_child_password(row, session, dry_run=dry_run)
+        # Steps 7-9: Child user creation (optional — controlled by create_child_user in config)
+        if CREATE_CHILD_USER:
+            child_user_id = step_create_child_user(row, token, org_id, dry_run=dry_run)
+            result[COL_CHILD_USER_ID] = child_user_id
+            session = step_signin_child(row, dry_run=dry_run)
+            step_reset_child_password(row, session, dry_run=dry_run)
+        else:
+            logger.info("[%s] Skipping child user creation (create_child_user=false)", row[COL_ROOT_EMAIL])
 
         # Steps T1/T2: Create tenants using root JWT from step 3 (no re-auth needed)
         tenant_result = provision_tenants_for_row(row, dry_run=dry_run, token=token)
@@ -941,11 +987,21 @@ def step_create_tenant(
     }
     if dry_run:
         _post("/org/organization/", payload, token=token, dry_run=True)
+        _post("/auth/users/DRY_RUN_OWNER_ID/assign-org/DRY_RUN_TENANT_ID", {}, token=token, dry_run=True)
         return "DRY_RUN_TENANT_ID"
 
     data = _post("/org/organization/", payload, token=token)
-    tenant_id = data.get("OrgId", data.get("Id", data.get("TenantId", "")))
-    logger.info("Tenant '%s' created (id=%s)", tenant_name, tenant_id)
+    tenant_id = data.get("ID", data.get("OrgId", data.get("Id", data.get("TenantId", ""))))
+    owner_id = data.get("Owner", "")
+    if not tenant_id:
+        raise ValueError(f"create tenant returned no ID for '{tenant_name}'")
+    logger.info("Tenant '%s' created (id=%s owner=%s)", tenant_name, tenant_id, owner_id)
+
+    # Assign the org to the owner user
+    if owner_id and tenant_id:
+        _post(f"/auth/users/{owner_id}/assign-org/{tenant_id}", {}, token=token)
+        logger.info("Tenant '%s' assigned to owner (owner_id=%s)", tenant_name, owner_id)
+
     return tenant_id
 
 
@@ -957,7 +1013,7 @@ def provision_tenants_for_row(
     When token is provided (inline call from provision_user) the root JWT from
     step 3 is reused directly — no re-authentication needed.
     When token is None (create-tenants fallback) a fresh signin is performed.
-    Owner is set to the root user's email address.
+    Owner is set to the root user's UUID (extracted from the JWT 'userid' claim).
     """
     result: Dict[str, str] = {
         COL_TENANT1_ID: "",
@@ -965,10 +1021,10 @@ def provision_tenants_for_row(
         COL_TENANT_STATUS: "FAILED",
         COL_TENANT_ERROR: "",
     }
-    owner = row.get(COL_ROOT_EMAIL, "")
+    root_email = row.get(COL_ROOT_EMAIL, "")
     msp_name = row.get(COL_MSP_ORG, "")
 
-    if not owner:
+    if not root_email:
         result[COL_TENANT_ERROR] = "Missing Root Email"
         return result
 
@@ -976,6 +1032,10 @@ def provision_tenants_for_row(
         # Use provided token (inline) or re-authenticate (fallback path)
         if token is None:
             token, _, _ = step_signin_root(row, dry_run=dry_run)
+
+        # Owner must be the root user's UUID — fetch from /auth/user
+        owner = step_get_user_details(token, dry_run=dry_run)
+        logger.info("[%s] Resolved owner UserId: %s", root_email, owner)
 
         tenant1_name = row.get(COL_TENANT1_NAME, "").strip()
         tenant2_name = row.get(COL_TENANT2_NAME, "").strip()
@@ -1006,6 +1066,70 @@ def provision_tenants_for_row(
         logger.error("[%s] Tenant creation FAILED: %s", row[COL_ROOT_EMAIL], exc)
 
     return result
+
+
+def cmd_invoke_lambda(args: argparse.Namespace) -> None:
+    """Re-run Step 10: invoke Lambda for SUCCESS rows where Features Enabled is not yet 'true'."""
+    csv_path = Path(args.csv)
+    if not csv_path.is_absolute():
+        if not csv_path.exists():
+            csv_path = Path(__file__).parent / csv_path
+
+    workers: int = args.workers or PARALLEL_WORKERS
+    dry_run: bool = args.dry_run
+
+    if not LAMBDA_ENABLED or not LAMBDA_FUNCTION_NAME:
+        logger.error("Lambda is not enabled or function_name is missing in config.yaml")
+        sys.exit(1)
+
+    logger.info("Loading CSV: %s", csv_path)
+    rows = load_csv(csv_path)
+
+    pending = [
+        r for r in rows
+        if r.get(COL_STATUS) == "SUCCESS" and r.get(COL_LAMBDA_STATUS, "") != "true"
+    ]
+    already_done = [
+        r for r in rows
+        if r.get(COL_LAMBDA_STATUS, "") == "true"
+    ]
+    ineligible = [
+        r for r in rows
+        if r.get(COL_STATUS) != "SUCCESS" and r.get(COL_LAMBDA_STATUS, "") != "true"
+    ]
+
+    logger.info(
+        "%d rows for Lambda invocation (%d already done, %d ineligible)%s",
+        len(pending), len(already_done), len(ineligible),
+        " [DRY-RUN]" if dry_run else "",
+    )
+
+    if not pending:
+        logger.info("Nothing to do.")
+        return
+
+    lambda_futures: Dict = {}
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for row in pending:
+            fut = pool.submit(step_invoke_lambda, row, dry_run)
+            lambda_futures[fut] = row
+        for fut in as_completed(lambda_futures):
+            row = lambda_futures[fut]
+            try:
+                fut.result()
+                row[COL_LAMBDA_STATUS] = "true"
+            except Exception as exc:
+                row[COL_LAMBDA_STATUS] = "false"
+                logger.error("[%s] Lambda invocation failed: %s", row[COL_ROOT_EMAIL], exc)
+
+    final_rows = ineligible + already_done + pending
+    out_csv, out_json = output_paths("lambda")
+    write_output(final_rows, out_csv, OUTPUT_COLUMNS)
+    write_json(final_rows, out_json)
+
+    success = sum(1 for r in pending if r.get(COL_LAMBDA_STATUS) == "true")
+    failed = sum(1 for r in pending if r.get(COL_LAMBDA_STATUS) != "true")
+    logger.info("Done. %d succeeded, %d failed.", success, failed)
 
 
 def cmd_create_tenants(args: argparse.Namespace) -> None:
@@ -1170,6 +1294,36 @@ Examples:
         help="Log API calls without executing them",
     )
     p_tenants.set_defaults(func=cmd_create_tenants)
+
+    # --- invoke-lambda sub-command ---
+    p_lambda = subparsers.add_parser(
+        "invoke-lambda",
+        help="Re-run Step 10: invoke Lambda for SUCCESS rows where Features Enabled != true",
+        description=(
+            "Reads an output CSV and invokes the platform-events Lambda for every row "
+            "where Status=SUCCESS but Features Enabled is not yet 'true'. "
+            "Writes a new timestamped output CSV/JSON with updated Features Enabled values."
+        ),
+    )
+    p_lambda.add_argument(
+        "--csv",
+        required=True,
+        metavar="FILE",
+        help="Path to the output CSV produced by create-users",
+    )
+    p_lambda.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        metavar="N",
+        help=f"Parallel workers (default: parallel_workers in config.yaml = {PARALLEL_WORKERS})",
+    )
+    p_lambda.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Log Lambda calls without executing them",
+    )
+    p_lambda.set_defaults(func=cmd_invoke_lambda)
 
     args = parser.parse_args()
     args.func(args)
