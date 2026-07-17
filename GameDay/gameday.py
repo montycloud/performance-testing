@@ -533,6 +533,11 @@ def provision_user(
         # Step 3b: Refresh token to get AccessToken for change-password
         access_token = step_refresh_token(token, refresh_token, dry_run=dry_run)
 
+        # Brief pause to allow Cognito user record to fully propagate before
+        # change-password — avoids intermittent "User does not exist" 500 errors.
+        if not dry_run:
+            time.sleep(5)
+
         # Step 4: Change password
         step_change_password(row, token, access_token, dry_run=dry_run)
 
