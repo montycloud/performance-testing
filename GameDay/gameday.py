@@ -268,21 +268,26 @@ def _get(
 # ---------------------------------------------------------------------------
 
 
-def step_get_user_details(token: str, dry_run: bool = False) -> str:
-    """GET /auth/user — fetch the current root user's profile and return their UserId.
+def step_get_user_details(token: str, dry_run: bool = False) -> Tuple[str, str]:
+    """GET /auth/user — fetch the current root user's profile.
 
-    The UserId is required as the Owner field when creating tenants.
+    Returns (user_id, org_id).
+    user_id (UserId) is required as the Owner field when creating tenants.
+    org_id (OrganizationId) is the canonical org ID written to COL_ROOT_ORG_ID.
     """
     if dry_run:
         logger.info("[DRY-RUN] GET %s/auth/user", BASE_URL)
-        return "DRY_RUN_USER_ID"
+        return ("DRY_RUN_USER_ID", "DRY_RUN_ORG_ID")
 
     data = _get("/auth/user", token=token)
     user_id = data.get("UserId", "")
+    org_id = data.get("OrganizationId", "")
     if not user_id:
         raise ValueError("GET /auth/user returned no UserId")
-    logger.debug("Resolved UserId: %s", user_id)
-    return user_id
+    if not org_id:
+        raise ValueError("GET /auth/user returned no OrganizationId")
+    logger.debug("Resolved UserId: %s  OrganizationId: %s", user_id, org_id)
+    return user_id, org_id
 
 
 def step_signup(row: Dict[str, str], dry_run: bool = False) -> None:
@@ -597,7 +602,10 @@ def provision_user(
         # Step 3: Signin as root
         token, org_id, refresh_token = step_signin_root(row, dry_run=dry_run)
         result[COL_ROOT_JWT] = token
-        result[COL_ROOT_ORG_ID] = org_id
+
+        # Step 3a: Fetch canonical OrganizationId from GET /auth/user
+        user_id, org_id_from_api = step_get_user_details(token, dry_run=dry_run)
+        result[COL_ROOT_ORG_ID] = org_id_from_api
 
         # Step 3b: Refresh token to get AccessToken for change-password
         access_token = step_refresh_token(token, refresh_token, dry_run=dry_run)
@@ -624,7 +632,7 @@ def provision_user(
             logger.info("[%s] Skipping child user creation (create_child_user=false)", row[COL_ROOT_EMAIL])
 
         # Steps T1/T2: Create tenants using root JWT from step 3 (no re-auth needed)
-        tenant_result = provision_tenants_for_row(row, dry_run=dry_run, token=token)
+        tenant_result = provision_tenants_for_row(row, dry_run=dry_run, token=token, owner_user_id=user_id)
         result.update(tenant_result)
 
         # Step T3: Create API key for root user
@@ -1006,14 +1014,19 @@ def step_create_tenant(
 
 
 def provision_tenants_for_row(
-    row: Dict[str, str], dry_run: bool = False, token: Optional[str] = None
+    row: Dict[str, str],
+    dry_run: bool = False,
+    token: Optional[str] = None,
+    owner_user_id: Optional[str] = None,
 ) -> Dict[str, str]:
     """Create both tenants for a single row. Returns update dict.
 
     When token is provided (inline call from provision_user) the root JWT from
     step 3 is reused directly — no re-authentication needed.
     When token is None (create-tenants fallback) a fresh signin is performed.
-    Owner is set to the root user's UUID (extracted from the JWT 'userid' claim).
+    When owner_user_id is provided the /auth/user call is skipped (already
+    fetched by provision_user); otherwise it is fetched here.
+    Owner is set to the root user's UUID from /auth/user.
     """
     result: Dict[str, str] = {
         COL_TENANT1_ID: "",
@@ -1033,8 +1046,11 @@ def provision_tenants_for_row(
         if token is None:
             token, _, _ = step_signin_root(row, dry_run=dry_run)
 
-        # Owner must be the root user's UUID — fetch from /auth/user
-        owner = step_get_user_details(token, dry_run=dry_run)
+        # Owner must be the root user's UUID — use pre-fetched value if available
+        if owner_user_id is not None:
+            owner = owner_user_id
+        else:
+            owner, _ = step_get_user_details(token, dry_run=dry_run)
         logger.info("[%s] Resolved owner UserId: %s", root_email, owner)
 
         tenant1_name = row.get(COL_TENANT1_NAME, "").strip()
