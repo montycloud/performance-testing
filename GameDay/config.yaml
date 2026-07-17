@@ -1,0 +1,37 @@
+# GameDay User Creation Configuration
+# Edit this file to change API targets, parallelism, and defaults.
+# Secret tokens go in .env (see .env.example) — not here.
+
+api:
+  base_url: "https://dev-api.montycloud.com"
+  captcha_code_env_var: "CAPTCHA_CODE"  # name of the .env variable holding the captcha/debug token
+  mc_debug_mode: true                   # set to false for staging / production
+  timeout_seconds: 30
+
+users:
+  parallel_workers: 10          # max root users provisioned in parallel; override with --workers
+  root_designation: "Business Analyst"  # Designation field in every root user signup payload
+  csv_file: "sample_users.csv"  # default input CSV; override with --csv
+  create_child_user: false       # set to true to run steps 7-9 (child user creation + password reset)
+
+lambda:
+  enabled: true
+  function_name: "publish-platform-events-dev1-publish_platform_events"
+  region: "us-east-1"
+  profile: "default"               # AWS named profile to use; leave blank to use default credential chain
+  enabled_features:
+    MTEnabled: true
+    FBPEnabled: true
+    AgenticMarvin: true
+    AIApps: true
+
+api_key:
+  name: "APIKey"        # Name field in the API key creation payload
+  expiry_days: 90       # ExpiryDays field in the payload
+
+cognito:
+  enabled: true
+  user_pool_id: "us-east-1_OQq45Tp18"   # Cognito User Pool ID for email auto-confirmation
+  region: "us-east-1"
+  profile: "default"                         # AWS named profile; blank = default credential chain
+  confirm_wait_seconds: 5                 # seconds to sleep after batch confirmation before provisioning
