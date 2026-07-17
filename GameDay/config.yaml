@@ -9,7 +9,7 @@ api:
   timeout_seconds: 30
 
 users:
-  parallel_workers: 10          # max root users provisioned in parallel; override with --workers
+  parallel_workers: 5         # max root users provisioned in parallel; override with --workers
   root_designation: "Business Analyst"  # Designation field in every root user signup payload
   csv_file: "sample_users.csv"  # default input CSV; override with --csv
   create_child_user: false       # set to true to run steps 7-9 (child user creation + password reset)
