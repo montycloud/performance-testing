@@ -98,7 +98,6 @@ MC_DEBUG_MODE: bool = bool(_cfg["api"]["mc_debug_mode"])
 PARALLEL_WORKERS: int = int(_cfg["users"]["parallel_workers"])
 ROOT_DESIGNATION: str = _cfg["users"]["root_designation"]
 _DEFAULT_CSV: str = _cfg["users"]["csv_file"]
-CREATE_CHILD_USER: bool = bool(_cfg["users"].get("create_child_user", False))
 
 # The captcha token is the only secret — name of its env var is in config.yaml
 CAPTCHA_CODE: str = _require_env(_cfg["api"]["captcha_code_env_var"])
@@ -150,17 +149,12 @@ COL_ROOT_EMAIL = "Root Email"
 COL_ROOT_NAME = "Root Name"
 COL_MSP_ORG = "MSP Org Name"
 COL_ROOT_PASSWORD = "Root Password"
-COL_CHILD_EMAIL = "Child Email"
-COL_CHILD_NAME = "Child Name"
 COL_ROOT_NEW_PASSWORD = "Root New Password"  # proposed password used in change-password step
-COL_CHILD_PASSWORD = "Child Password"       # initial temp password used at creation
-COL_CHILD_NEW_PASSWORD = "Child New Password"  # permanent password set via reset_temp_password
 COL_TENANT1_NAME = "Child Tenant 1 Name"
 COL_TENANT2_NAME = "Child Tenant 2 Name"
 
 REQUIRED_COLUMNS = [
     COL_ROOT_EMAIL, COL_ROOT_NAME, COL_MSP_ORG, COL_ROOT_PASSWORD, COL_ROOT_NEW_PASSWORD,
-    COL_CHILD_EMAIL, COL_CHILD_NAME, COL_CHILD_PASSWORD, COL_CHILD_NEW_PASSWORD,
     COL_TENANT1_NAME, COL_TENANT2_NAME,
 ]
 
@@ -169,7 +163,6 @@ REQUIRED_COLUMNS = [
 # never written to disk to prevent accidental checkins of secrets.
 COL_ROOT_JWT = "Root JWT Token"   # used internally only; not persisted to CSV
 COL_ROOT_ORG_ID = "Root Org ID"
-COL_CHILD_USER_ID = "Child User ID"
 COL_STATUS = "Status"
 COL_ERROR = "Error"
 COL_LAMBDA_STATUS = "Features Enabled"  # "true" / "false" after Lambda invocation in step 10
@@ -177,8 +170,8 @@ COL_LAMBDA_STATUS = "Features Enabled"  # "true" / "false" after Lambda invocati
 # Output columns added by create-tenants
 COL_TENANT1_ID = "Tenant 1 ID"
 COL_TENANT2_ID = "Tenant 2 ID"
-COL_TENANT_STATUS = "Tenant Status"
-COL_TENANT_ERROR = "Tenant Error"
+COL_TENANT_STATUS = "Tenant Status"   # used internally only; not written to output CSV
+COL_TENANT_ERROR = "Tenant Error"     # used internally only; not written to output CSV
 
 # Output columns added by API key creation (step T3)
 COL_API_KEY_ID = "API Key ID"
@@ -186,10 +179,10 @@ COL_API_SECRET_KEY = "API Secret Key"
 COL_ACCESS_KEY = "Access Key"
 
 OUTPUT_COLUMNS = REQUIRED_COLUMNS + [
-    COL_ROOT_ORG_ID, COL_CHILD_USER_ID,
-    COL_STATUS, COL_ERROR, COL_LAMBDA_STATUS,
-    COL_TENANT1_ID, COL_TENANT2_ID, COL_TENANT_STATUS, COL_TENANT_ERROR,
+    COL_ROOT_ORG_ID, COL_LAMBDA_STATUS,
+    COL_TENANT1_ID, COL_TENANT2_ID,
     COL_API_KEY_ID, COL_API_SECRET_KEY, COL_ACCESS_KEY,
+    COL_STATUS, COL_ERROR,
 ]
 
 # Alias kept for the create-tenants fallback command
@@ -431,73 +424,6 @@ def step_submit_support_request(
     logger.info("[%s] Support request submitted", row[COL_ROOT_EMAIL])
 
 
-def step_create_child_user(
-    row: Dict[str, str], token: str, org_id: str, dry_run: bool = False
-) -> str:
-    """Step 7 — Create child user under root's org.
-
-    Returns UserId of the created child user.
-    """
-    payload = {
-        "Permissions": [
-            {"Role": CHILD_ROLE_ID, "Dept": "*", "Org": org_id}
-        ],
-        "Name": row[COL_CHILD_NAME],
-        "Email": row[COL_CHILD_EMAIL],
-        "Password": row[COL_CHILD_PASSWORD],
-        "Description": "",
-    }
-    if dry_run:
-        _post("/auth/user", payload, token=token, dry_run=True)
-        return "DRY_RUN_USER_ID"
-
-    data = _post("/auth/user", payload, token=token)
-    user_id = data.get("UserId", "")
-    if not user_id:
-        raise ValueError(f"create child user returned no UserId for {row[COL_CHILD_EMAIL]}")
-    logger.info("[%s] Child user created (UserId=%s)", row[COL_CHILD_EMAIL], user_id)
-    return user_id
-
-
-def step_signin_child(row: Dict[str, str], dry_run: bool = False) -> str:
-    """Step 8 — Sign in as child user to obtain the session token.
-
-    Returns the Session string needed for password reset.
-    """
-    payload = {
-        "Username": row[COL_CHILD_EMAIL],
-        "Password": row[COL_CHILD_PASSWORD],
-        "MC_DEBUG_MODE": MC_DEBUG_MODE,
-    }
-    if dry_run:
-        _post("/auth/signin", payload, dry_run=True)
-        return "DRY_RUN_SESSION"
-
-    data = _post("/auth/signin", payload)
-    session = data.get("Session", "")
-    if not session:
-        raise ValueError(
-            f"child signin returned no Session for {row[COL_CHILD_EMAIL]}. "
-            f"ChallengeName={data.get('ChallengeName')}"
-        )
-    logger.info("[%s] Child signin complete", row[COL_CHILD_EMAIL])
-    return session
-
-
-def step_reset_child_password(
-    row: Dict[str, str], session: str, dry_run: bool = False
-) -> None:
-    """Step 9 — Reset child user's temporary password to the permanent new password."""
-    payload = {
-        "Session": session,
-        "Username": row[COL_CHILD_EMAIL],
-        "Password": row[COL_CHILD_NEW_PASSWORD],
-        "CaptchaCode": CAPTCHA_CODE,
-    }
-    _post("/auth/reset_temp_password", payload, dry_run=dry_run)
-    logger.info("[%s] Child password reset complete", row[COL_CHILD_EMAIL])
-
-
 def step_invoke_lambda(row: Dict[str, str], dry_run: bool = False) -> None:
     """Step 10 — Invoke platform-events Lambda to enable features for the root user."""
     email = row[COL_ROOT_EMAIL]
@@ -587,11 +513,8 @@ def provision_user(
     result: Dict[str, str] = {
         COL_ROOT_JWT: "",
         COL_ROOT_ORG_ID: "",
-        COL_CHILD_USER_ID: "",
         COL_TENANT1_ID: "",
         COL_TENANT2_ID: "",
-        COL_TENANT_STATUS: "",
-        COL_TENANT_ERROR: "",
         COL_API_KEY_ID: "",
         COL_API_SECRET_KEY: "",
         COL_ACCESS_KEY: "",
@@ -610,6 +533,11 @@ def provision_user(
         # Step 3b: Refresh token to get AccessToken for change-password
         access_token = step_refresh_token(token, refresh_token, dry_run=dry_run)
 
+        # Brief pause to allow Cognito user record to fully propagate before
+        # change-password — avoids intermittent "User does not exist" 500 errors.
+        if not dry_run:
+            time.sleep(5)
+
         # Step 4: Change password
         step_change_password(row, token, access_token, dry_run=dry_run)
 
@@ -621,15 +549,6 @@ def provision_user(
 
         # Step 6: Support request
         step_submit_support_request(row, token, dry_run=dry_run)
-
-        # Steps 7-9: Child user creation (optional — controlled by create_child_user in config)
-        if CREATE_CHILD_USER:
-            child_user_id = step_create_child_user(row, token, org_id, dry_run=dry_run)
-            result[COL_CHILD_USER_ID] = child_user_id
-            session = step_signin_child(row, dry_run=dry_run)
-            step_reset_child_password(row, session, dry_run=dry_run)
-        else:
-            logger.info("[%s] Skipping child user creation (create_child_user=false)", row[COL_ROOT_EMAIL])
 
         # Steps T1/T2: Create tenants using root JWT from step 3 (no re-auth needed)
         tenant_result = provision_tenants_for_row(row, dry_run=dry_run, token=token, owner_user_id=user_id)
@@ -797,7 +716,7 @@ def cmd_create_users(args: argparse.Namespace) -> None:
                     results[idx] = _merge_result(
                         row,
                         {COL_STATUS: "FAILED", COL_ERROR: f"signup: {exc}",
-                         COL_ROOT_ORG_ID: "", COL_CHILD_USER_ID: ""},
+                         COL_ROOT_ORG_ID: ""},
                     )
 
         # Determine which rows had successful signup
@@ -899,7 +818,6 @@ def cmd_create_users(args: argparse.Namespace) -> None:
                         COL_STATUS: "FAILED",
                         COL_ERROR: str(exc),
                         COL_ROOT_ORG_ID: "",
-                        COL_CHILD_USER_ID: "",
                     }
                 with _lock:
                     results[idx] = _merge_result(row, update)

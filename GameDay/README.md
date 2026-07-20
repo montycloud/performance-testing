@@ -1,6 +1,6 @@
 # GameDay User Creation Tool
 
-A Python CLI that bulk-provisions MontyCloud root users and their child users from a CSV file, with **up to 10 parallel workers** (configurable). Each root user gets a full setup: signup → email verification → signin → preferences → subscription → child user creation → tenant creation.
+A Python CLI that bulk-provisions MontyCloud root users from a CSV file, with **up to 10 parallel workers** (configurable). Each root user gets a full setup: signup → email verification → signin → preferences → subscription → tenant creation.
 
 ---
 
@@ -35,9 +35,8 @@ A Python CLI that bulk-provisions MontyCloud root users and their child users fr
 
 ```
 Root User (signup + preferences + subscription)
-└── Child User (created under root's org)
-    ├── Child Tenant 1 (e.g. Unicorn.Rentals)
-    └── Child Tenant 2 (e.g. Blume Corporation)
+├── Tenant 1 (e.g. Unicorn.Rentals)
+└── Tenant 2 (e.g. Blume Corporation)
 ```
 
 ---
@@ -108,18 +107,15 @@ All original columns are preserved and the following are appended:
 
 | Column | Description |
 |--------|-------------|
-| `Root Org ID` | Org ID from the root user's roles (used for child user creation) |
-| `Child User ID` | `UserId` returned when creating the child user |
-| `Status` | `SUCCESS` or `FAILED` |
-| `Error` | Error message if `Status=FAILED`, empty otherwise |
+| `Root Org ID` | `OrganizationId` from `GET /auth/user` (canonical org ID) |
 | `Features Enabled` | `true` if the Lambda feature-enablement step succeeded, `false` if it failed, blank if the row did not reach Step 10 |
-| `Tenant 1 ID` | `OrgId` of the first tenant created (inline after step 9) |
+| `Tenant 1 ID` | `OrgId` of the first tenant created |
 | `Tenant 2 ID` | `OrgId` of the second tenant created |
-| `Tenant Status` | `SUCCESS` or `FAILED` (independent of `Status` — a user can be `SUCCESS` even if tenants fail) |
-| `Tenant Error` | Error message if `Tenant Status=FAILED` |
 | `API Key ID` | `APIKeyId` returned by the API key creation endpoint |
 | `API Secret Key` | `APISecretKey` returned by the endpoint — treat as a secret |
 | `Access Key` | `AccessKey` returned by the endpoint |
+| `Status` | `SUCCESS` or `FAILED` |
+| `Error` | Error message if `Status=FAILED`, empty otherwise |
 
 ---
 
@@ -178,7 +174,7 @@ python gameday.py create-tenants --csv users_output_20260701_120000.csv
 python gameday.py create-tenants --csv users_output_20260701_120000.csv --dry-run
 ```
 
-> **Note**: Tenants are created **automatically** as part of `create-users` (inline after step 9, using the root JWT from sign-in — no re-authentication). Use `create-tenants` only as a **fallback** if tenant creation failed for some rows — it reads the output CSV and retries rows where `Tenant Status=FAILED`.
+> **Note**: Tenants are created **automatically** as part of `create-users` (inline after step 6, using the root JWT from sign-in — no re-authentication). Use `create-tenants` only as a **fallback** if tenant creation failed for some rows.
 
 ---
 
@@ -209,21 +205,13 @@ The `create-users` command executes the following steps for each row. Steps with
 | 5 | `POST /subscription` | Activate `Trial` subscription. |
 | 6 | `POST /customersupport/submitrequest/` | Submit a customer support request with an empty payload `{}`. |
 
-### Child User Provisioning
+### Tenant Creation (inline, runs automatically after step 6)
 
 | Step | API Endpoint | Description |
 |------|-------------|-------------|
-| 7 | `POST /auth/user` | Create child user under root's org. Saves `UserId`. Role, Dept, and Description are hardcoded. |
-| 8 | `POST /auth/signin` | Sign in as child user. Expects `ChallengeName: NEW_PASSWORD_REQUIRED` response. Saves `Session`. |
-| 9 | `POST /auth/reset_temp_password` | Reset the temporary child user password using the `Session` from step 8. |
 | 10 | AWS Lambda | Invoke `publish-platform-events` Lambda to fire a `customerUpdateRequested` event that enables `MTEnabled`, `FBPEnabled`, `AgenticMarvin`, and `AIApps` features for the root user. Result written to `Features Enabled` column. |
-
-### Tenant Creation (inline, runs automatically after step 9)
-
-| Step | API Endpoint | Description |
-|------|-------------|-------------|
-| T1 | `POST /org/organization/` | Create Tenant 1 under root's org. `Owner` is set to the root user's email. Reuses the JWT token from step 3 — no re-authentication needed. |
-| T2 | `POST /org/organization/` | Create Tenant 2 under root's org. `Owner` is set to the root user's email. |
+| T1 | `POST /org/organization/` | Create Tenant 1 under root's org. `Owner` is the root user's UUID from `GET /auth/user`. Reuses the JWT token from step 3 — no re-authentication needed. |
+| T2 | `POST /org/organization/` | Create Tenant 2 under root's org. `Owner` is the root user's UUID from `GET /auth/user`. |
 | T3 | `POST /day2/platform/api/v1/api-keys/` | Create an API key for the root user. Payload: `{"Name": ..., "ExpiryDays": ...}` (configurable). Saves `APIKeyId`, `APISecretKey`, and `AccessKey` to output CSV. |
 
 ---
@@ -299,13 +287,13 @@ Total rows in CSV
 │
 ├── Batch 1  (rows 1–10, workers=10)
 │   ├── [Parallel] Step 1: Signup all 10 users
-│   ├── [PAUSE]   Manual email verification
-│   └── [Parallel] Steps 3-9: Provision all 10 users
+│   ├── [PAUSE]   Email verification (auto via Cognito or manual)
+│   └── [Parallel] Steps 3–T3: Provision all 10 users
 │
 ├── Batch 2  (rows 11–20)
 │   ├── [Parallel] Step 1: Signup 10 users
-│   ├── [PAUSE]   Manual email verification
-│   └── [Parallel] Steps 3-9: Provision 10 users
+│   ├── [PAUSE]   Email verification
+│   └── [Parallel] Steps 3–T3: Provision 10 users
 │
 └── ... (continues until all rows processed)
 ```
@@ -386,11 +374,6 @@ All non-secret configuration is in `config.yaml` (same directory as `gameday.py`
 - **Cause**: Email verification was not completed before pressing Enter.
 - **Fix**: Verify the email in the MontyCloud console, then re-run. The script will retry only failed rows.
 
-### `Status=FAILED` at signin step — `ChallengeName` not present (child user)
-
-- **Cause**: The child user's initial password may have already been reset, or the child signin returned a different challenge.
-- **Fix**: Check the `Error` column in the output CSV for details. Manually inspect the child account.
-
 ### `Features Enabled=false` — Lambda invocation failed
 
 - **Cause**: AWS credentials not configured, wrong profile name, or Lambda function name incorrect.
@@ -404,10 +387,10 @@ All non-secret configuration is in `config.yaml` (same directory as `gameday.py`
 ### `Status=FAILED` — "POST /auth/change-password returned 400" (min 8 chars, uppercase, lowercase, digit, special char).
 - **Fix**: Update `Root Password` in the CSV to a compliant password (e.g. `Gamedayaws156!`) and re-run.
 
-### `Tenant Status=FAILED` — tenant creation failed inline
+### Tenant creation failed inline
 
 - **Cause**: API error during tenant creation (e.g. duplicate tenant name, expired token).
-- **Fix**: Check the `Tenant Error` column for details. Re-run using the fallback command: `python gameday.py create-tenants --csv users_output_<ts>.csv` — it skips rows where `Tenant Status=SUCCESS`.
+- **Fix**: Check the `Error` column for details. Re-run using the fallback command: `python gameday.py create-tenants --csv users_output_<ts>.csv`.
 
 ### JWT token expired during a long run
 
@@ -447,5 +430,5 @@ GameDay/
 - [ ] `python gameday.py create-users --csv my_users.csv --dry-run` (validate first)
 - [ ] `python gameday.py create-users --csv my_users.csv`
 - [ ] Verify emails when prompted (see [Section 7](#7-manual-step--email-verification))
-- [ ] Check `users_output_<ts>.csv` — confirm all rows are `Status=SUCCESS` and `Tenant Status=SUCCESS`
-- [ ] If any row has `Tenant Status=FAILED`, re-run: `python gameday.py create-tenants --csv users_output_<ts>.csv`
+- [ ] Check `users_output_<ts>.csv` — confirm all rows show `Status=SUCCESS`
+- [ ] If any row has `Status=FAILED`, re-run: `python gameday.py create-users --csv users_output_<ts>.csv`
