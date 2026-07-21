@@ -3,7 +3,7 @@
 # Secret tokens go in .env (see .env.example) — not here.
 
 api:
-  base_url: "https://stg1-api.montycloud.com"
+  base_url: "https://api.montycloud.com"
   captcha_code_env_var: "CAPTCHA_CODE"  # name of the .env variable holding the captcha/debug token
   mc_debug_mode: true                   # set to false for staging / production
   timeout_seconds: 30
@@ -11,12 +11,12 @@ api:
 users:
   parallel_workers: 5         # max root users provisioned in parallel; override with --workers
   root_designation: "Business Analyst"  # Designation field in every root user signup payload
-  csv_file: "sample_2_users.csv"  # default input CSV; override with --csv
+  csv_file: "production_users.csv"  # default input CSV; override with --csv
   create_child_user: false       # set to true to run steps 7-9 (child user creation + password reset)
 
 lambda:
   enabled: true
-  function_name: "publish-platform-events-stg1-publish_platform_events"
+  function_name: "publish-platform-events-prd01-publish_platform_events"
   region: "us-east-2"
   profile: ""               # AWS named profile to use; leave blank to use default credential chain
   enabled_features:
