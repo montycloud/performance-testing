@@ -26,13 +26,16 @@ import csv
 import json
 import logging
 import random
+import re
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import gevent
 import gevent.pool
+import websocket
 import yaml
 from requests.adapters import HTTPAdapter
 from dotenv import load_dotenv
@@ -105,6 +108,58 @@ _health_cfg: Dict[str, Any] = CFG.get("health", {}) or {}
 _HEALTH_ENABLED: bool = bool(_health_cfg.get("enabled", False))
 _HEALTH_MODE: str = str(_health_cfg.get("mode", "appended")).strip().lower()
 
+# Chat flow (config section: `chat`). WebSocket-based AI chat bot journey.
+#   enabled  - whether the Chat call runs at all. False preserves today's
+#              behaviour exactly (no WebSocket activity).
+#   mode     - "appended"  : Signin -> Home Page -> WAFR -> (Health) -> think time -> Chat
+#              "standalone": Signin -> think time -> Chat (skips Home/WAFR/Health)
+#
+# NOTE: each chat call opens ONE WebSocket connection and sends ONE query,
+# then closes. Multi-turn conversations on a single connection are deferred
+# — see WEBSOCKET_CHAT_APPROACH.md.
+_chat_cfg: Dict[str, Any] = CFG.get("chat", {}) or {}
+_CHAT_ENABLED: bool = bool(_chat_cfg.get("enabled", False))
+_CHAT_MODE: str = str(_chat_cfg.get("mode", "appended")).strip().lower()
+WS_BASE_URL: str = str(_chat_cfg.get("ws_base_url", "")).rstrip("/")
+_CHAT_TIMEOUT: float = float(_chat_cfg.get("timeout_seconds", 120))
+_CHAT_MODEL_ID: str = str(_chat_cfg.get("model_id", ""))
+_CHAT_TEMPERATURE: float = float(_chat_cfg.get("temperature", 0.1))
+_CHAT_TOP_P: float = float(_chat_cfg.get("top_p", 1))
+_CHAT_TOP_K: int = int(_chat_cfg.get("top_k", 250))
+
+if _CHAT_ENABLED and _HEALTH_ENABLED and _CHAT_MODE == "standalone" and _HEALTH_MODE == "standalone":
+    logger.warning(
+        "Both 'health.mode' and 'chat.mode' are 'standalone' — chat takes "
+        "precedence; the Health Events flow will not run this test."
+    )
+
+# Optional per-message chat transcript log (config: chat.transcript_log).
+# Blank/unset = disabled (no separate file; only the summary lines already
+# logged via `logger` show up, subject to Locust's own --logfile/--loglevel).
+_CHAT_TRANSCRIPT_RAW: str = str(_chat_cfg.get("transcript_log", "")).strip()
+_CHAT_TRANSCRIPT_PATH: Optional[Path] = None
+if _CHAT_ENABLED and _CHAT_TRANSCRIPT_RAW:
+    _CHAT_TRANSCRIPT_PATH = Path(_CHAT_TRANSCRIPT_RAW)
+    if not _CHAT_TRANSCRIPT_PATH.is_absolute():
+        _CHAT_TRANSCRIPT_PATH = (_HERE / _CHAT_TRANSCRIPT_PATH).resolve()
+    _CHAT_TRANSCRIPT_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+_chat_transcript_logger: Optional[logging.Logger] = None
+if _CHAT_TRANSCRIPT_PATH is not None:
+    _chat_transcript_logger = logging.getLogger("perf_test.chat_transcript")
+    _chat_transcript_logger.setLevel(logging.INFO)
+    _chat_transcript_logger.propagate = False
+    if not _chat_transcript_logger.handlers:
+        _transcript_handler = logging.FileHandler(_CHAT_TRANSCRIPT_PATH, mode="a", encoding="utf-8")
+        _transcript_handler.setFormatter(logging.Formatter("%(asctime)s | %(message)s"))
+        _chat_transcript_logger.addHandler(_transcript_handler)
+    logger.info("Chat transcript logging enabled -> %s", _CHAT_TRANSCRIPT_PATH)
+
+
+def _redact_ws_url(url: str) -> str:
+    """Strip the JWT out of a WS URL before it ever reaches a log line."""
+    return re.sub(r"(Authorization=)[^&]+", r"\1<redacted>", url)
+
 
 def _load_users(csv_path: Path, limit: int) -> List[Dict[str, str]]:
     """Load up to *limit* rows from the users CSV."""
@@ -126,6 +181,57 @@ def _load_users(csv_path: Path, limit: int) -> List[Dict[str, str]]:
 
 
 USERS: List[Dict[str, str]] = _load_users(_users_csv_path, USER_COUNT)
+
+
+def _load_queries(path: Path) -> List[str]:
+    """Load non-empty, non-comment lines from the chat queries file."""
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Chat queries file not found: {path}\n"
+            f"  Update 'chat.queries_file' in config.yaml."
+        )
+    with open(path, "r", encoding="utf-8") as fh:
+        lines = [line.strip() for line in fh]
+    queries = [line for line in lines if line and not line.startswith("#")]
+    if not queries:
+        raise ValueError(f"Chat queries file is empty: {path}")
+    logger.info("Loaded %d chat quer(y/ies) from %s", len(queries), path)
+    return queries
+
+
+def _load_tenants(path: Path) -> Dict[str, Dict[str, Any]]:
+    """Load Tenant.json into a dict keyed by exact tenant `Name`."""
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Tenants file not found: {path}\n"
+            f"  Update 'chat.tenants_file' in config.yaml."
+        )
+    with open(path, "r", encoding="utf-8") as fh:
+        entries = json.load(fh)
+    if not isinstance(entries, list):
+        raise ValueError(f"Tenants file must be a JSON list: {path}")
+    tenants = {e["Name"]: e for e in entries if isinstance(e, dict) and e.get("Name")}
+    logger.info("Loaded %d tenant(s) from %s", len(tenants), path)
+    return tenants
+
+
+# Only load the queries/tenants files when the Chat flow is actually enabled,
+# so existing setups without chat_queries.txt/Tenant.json configured keep
+# working unchanged.
+QUERIES: List[str] = []
+TENANTS: Dict[str, Dict[str, Any]] = {}
+if _CHAT_ENABLED:
+    _queries_raw: str = str(_chat_cfg.get("queries_file", "./chat_queries.txt"))
+    _queries_path = Path(_queries_raw)
+    if not _queries_path.is_absolute():
+        _queries_path = (_HERE / _queries_path).resolve()
+    QUERIES = _load_queries(_queries_path)
+
+    _tenants_raw: str = str(_chat_cfg.get("tenants_file", "./Tenant.json"))
+    _tenants_path = Path(_tenants_raw)
+    if not _tenants_path.is_absolute():
+        _tenants_path = (_HERE / _tenants_path).resolve()
+    TENANTS = _load_tenants(_tenants_path)
 
 # ---------------------------------------------------------------------------
 # Thread-safe round-robin user assignment
@@ -319,7 +425,7 @@ class MontyCloudUser(HttpUser):
 
     @task
     def full_journey(self) -> None:
-        """Complete user journey: Home Page → WAFR Page → (optional) Health Events.
+        """Complete user journey: Home Page → WAFR Page → (optional) Health Events → (optional) Chat.
 
         Behaviour is controlled by ``run_mode`` in config.yaml:
 
@@ -339,6 +445,15 @@ class MontyCloudUser(HttpUser):
                                       behaviour).
           enabled=True, mode=appended    Home Page -> WAFR -> think time -> Health.
           enabled=True, mode=standalone  Skips Home Page/WAFR: think time -> Health.
+
+        The Chat flow (WebSocket) is controlled by ``chat`` in config.yaml:
+
+          enabled=False              No chat activity (default; unchanged behaviour).
+          enabled=True, mode=appended    ...WAFR/(Health) -> think time -> Chat.
+          enabled=True, mode=standalone  Skips Home Page/WAFR/Health: think time -> Chat.
+
+        If both ``health.mode`` and ``chat.mode`` are "standalone", chat takes
+        precedence (a startup warning is logged for this combination).
         """
         if not self._token:
             # Re-attempt signin if on_start failed
@@ -350,7 +465,11 @@ class MontyCloudUser(HttpUser):
                 )
                 raise StopUser()  # broken user — stop regardless of run_mode
 
-        if _HEALTH_ENABLED and _HEALTH_MODE == "standalone":
+        if _CHAT_ENABLED and _CHAT_MODE == "standalone":
+            # Signin -> think time -> Chat only (Home Page/WAFR/Health skipped).
+            gevent.sleep(random.uniform(_THINK_MIN, _THINK_MAX))
+            self._chat_flow()
+        elif _HEALTH_ENABLED and _HEALTH_MODE == "standalone":
             # Signin -> think time -> Health only (Home Page/WAFR skipped).
             gevent.sleep(random.uniform(_THINK_MIN, _THINK_MAX))
             self._health_flow()
@@ -363,6 +482,10 @@ class MontyCloudUser(HttpUser):
                 # Appended mode: another think time before drilling into Health.
                 gevent.sleep(random.uniform(_THINK_MIN, _THINK_MAX))
                 self._health_flow()
+            if _CHAT_ENABLED:
+                # Appended mode: another think time before starting the Chat call.
+                gevent.sleep(random.uniform(_THINK_MIN, _THINK_MAX))
+                self._chat_flow()
 
         if _RUN_MODE == "single_journey":
             self._iterations_done += 1
@@ -802,6 +925,259 @@ class MontyCloudUser(HttpUser):
                 params={"Offset": 0, "Limit": 10},
             ),
         ])
+
+    # ------------------------------------------------------------------
+    # Chat flow (WebSocket)
+    # ------------------------------------------------------------------
+    #
+    # Opens a single WebSocket connection, sends ONE query, and streams
+    # frames until PROMPT_STATUS/ENDED (or the overall timeout elapses).
+    # Multi-turn conversations on one connection are deferred — see
+    # WEBSOCKET_CHAT_APPROACH.md.
+    #
+    # OrganizationId (WS URL query param) stays as self._org_id, the signed-in
+    # user's own org fetched via /auth/user during sign-in — same as Home
+    # Page/WAFR/Health. The `tenant_scope` in the message body is different:
+    # it's looked up from Tenant.json (config: chat.tenants_file) by exact
+    # match against this user's `Tenant` column value in users.csv, since the
+    # chat bot's tenant scoping uses a tenant-specific org id, not the user's
+    # own root org.
+
+    def _fire_chat_metric(
+        self,
+        name: str,
+        start_time: float,
+        exception: Optional[BaseException] = None,
+    ) -> None:
+        """Record a pseudo-request into Locust's stats (custom-client pattern)."""
+        elapsed_ms = (time.monotonic() - start_time) * 1000
+        self.environment.events.request.fire(
+            request_type="WS",
+            name=name,
+            response_time=elapsed_ms,
+            response_length=0,
+            exception=exception,
+            context={},
+        )
+
+    def _log_chat_message(
+        self,
+        direction: str,
+        category: str,
+        elapsed_s: float,
+        detail: str,
+        max_len: int = 500,
+    ) -> None:
+        """Append one line to chat.transcript_log (no-op if not configured)."""
+        if _chat_transcript_logger is None:
+            return
+        email = self._creds.get("Email", "unknown")
+        if len(detail) > max_len:
+            detail = f"{detail[:max_len]}...(+{len(detail) - max_len} more chars)"
+        _chat_transcript_logger.info(
+            "%-28s | %-4s | %-11s | +%8.3fs | %s",
+            email, direction, category, elapsed_s, detail,
+        )
+
+    def _chat_flow(self) -> None:
+        email = self._creds.get("Email", "unknown")
+        if not WS_BASE_URL:
+            logger.error("[%s] chat.ws_base_url is not configured; skipping Chat flow.", email)
+            return
+        if not QUERIES:
+            logger.error("[%s] No chat queries loaded; skipping Chat flow.", email)
+            return
+
+        # Look up this user's tenant-specific org id + display name by exact
+        # match against Tenant.json's `Name` field. No fallback to
+        # self._org_id — skip the call and log an error if there's no match.
+        tenant_key = self._creds.get("Tenant", "")
+        tenant_entry = TENANTS.get(tenant_key)
+        if not tenant_entry:
+            logger.error(
+                "[%s] No Tenant.json entry found for Tenant=%r; skipping Chat flow.",
+                email, tenant_key,
+            )
+            return
+        tenant_id = tenant_entry.get("ID", "")
+        tenant_name = tenant_entry.get("Name", tenant_key)
+        if not tenant_id:
+            logger.error(
+                "[%s] Tenant.json entry for Tenant=%r has no 'ID'; skipping Chat flow.",
+                email, tenant_key,
+            )
+            return
+
+        url = (
+            f"{WS_BASE_URL}?Authorization={self._token}"
+            f"&OrganizationId={self._org_id}&agentic=true"
+        )
+
+        connect_start = time.monotonic()
+        try:
+            ws = websocket.create_connection(url, timeout=_CHAT_TIMEOUT)
+        except Exception as exc:
+            logger.error("[%s] Chat WebSocket connect failed: %s", email, exc)
+            self._log_chat_message(
+                "SYS", "CONNECT_FAIL", time.monotonic() - connect_start,
+                f"url={_redact_ws_url(url)} error={exc}",
+            )
+            self._fire_chat_metric("[Chat] full_response", connect_start, exc)
+            return
+
+        self._log_chat_message(
+            "SYS", "CONNECTED", time.monotonic() - connect_start,
+            f"url={_redact_ws_url(url)}",
+        )
+
+        query = random.choice(QUERIES)
+        payload = {
+            "query": query,
+            "thread_id": "",
+            "metadata": {
+                "model_id": _CHAT_MODEL_ID,
+                "temperature": _CHAT_TEMPERATURE,
+                "top_p": _CHAT_TOP_P,
+                "top_k": _CHAT_TOP_K,
+            },
+            "tenant_scope": [{tenant_id: tenant_name}],
+        }
+
+        t_send = time.monotonic()
+        ttft_recorded = False
+        ended = False
+        chat_exc: Optional[BaseException] = None
+
+        try:
+            ws.send(json.dumps(payload))
+            self._log_chat_message("SEND", "QUERY", 0.0, query)
+            deadline = t_send + _CHAT_TIMEOUT
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    chat_exc = TimeoutError(
+                        f"No PROMPT_STATUS/ENDED frame within {_CHAT_TIMEOUT}s"
+                    )
+                    logger.error("[%s] Chat timed out waiting for ENDED frame.", email)
+                    self._log_chat_message(
+                        "RECV", "TIMEOUT", time.monotonic() - t_send,
+                        f"No ENDED frame within {_CHAT_TIMEOUT}s",
+                    )
+                    break
+
+                ws.settimeout(remaining)
+                try:
+                    raw = ws.recv()
+                except websocket.WebSocketTimeoutException:
+                    chat_exc = TimeoutError(
+                        f"No PROMPT_STATUS/ENDED frame within {_CHAT_TIMEOUT}s"
+                    )
+                    logger.error("[%s] Chat timed out waiting for ENDED frame.", email)
+                    self._log_chat_message(
+                        "RECV", "TIMEOUT", time.monotonic() - t_send,
+                        f"No ENDED frame within {_CHAT_TIMEOUT}s",
+                    )
+                    break
+
+                if not raw:
+                    continue
+
+                frame_elapsed = time.monotonic() - t_send
+
+                try:
+                    frame = json.loads(raw)
+                except (ValueError, TypeError):
+                    logger.warning("[%s] Chat: non-JSON frame received; ignoring.", email)
+                    self._log_chat_message("RECV", "NON_JSON", frame_elapsed, str(raw))
+                    continue
+
+                # Informational AWS API Gateway notice — keep listening, don't fail.
+                if frame.get("message") == "Endpoint request timed out":
+                    logger.warning(
+                        "[%s] Chat received 'Endpoint request timed out' notice; "
+                        "continuing to listen for further frames.",
+                        email,
+                    )
+                    self._log_chat_message("RECV", "GW_TIMEOUT", frame_elapsed, raw)
+                    continue
+
+                if frame.get("type") == "THREAD_TITLE":
+                    logger.info("[%s] Chat thread started: %s", email, frame.get("thread_title"))
+                    self._log_chat_message("RECV", "THREAD_TITLE", frame_elapsed, raw)
+                    continue
+
+                # Top-level PROMPT_STATUS/ERROR (e.g. inaccessible tenant_scope
+                # org id) — no "body" wrapper, "message" is an object rather
+                # than a string. This is terminal: fail fast instead of
+                # waiting out the full timeout for a frame that will never
+                # arrive.
+                top_message = frame.get("message")
+                if frame.get("type") == "PROMPT_STATUS" and isinstance(top_message, dict) \
+                        and top_message.get("message") == "ERROR":
+                    chat_exc = RuntimeError(
+                        f"Chat PROMPT_STATUS ERROR: {top_message.get('error', top_message)}"
+                    )
+                    logger.error("[%s] Chat error frame: %s", email, top_message)
+                    self._log_chat_message("RECV", "PROMPT_ERROR", frame_elapsed, raw)
+                    break
+
+                body = frame.get("body") if isinstance(frame.get("body"), dict) else {}
+                body_type = body.get("type")
+                body_message = body.get("message")
+
+                if body_type == "PROMPT_STATUS" and body_message == "STARTED":
+                    logger.debug("[%s] Chat prompt STARTED.", email)
+                    self._log_chat_message("RECV", "STARTED", frame_elapsed, raw)
+                    continue
+
+                if body_type == "REASONING" and not ttft_recorded:
+                    ttft_recorded = True
+                    self._log_chat_message("RECV", "REASONING", frame_elapsed, raw)
+                    self._fire_chat_metric("[Chat] time_to_first_token", t_send)
+                    continue
+
+                if body_type == "REASONING":
+                    self._log_chat_message("RECV", "REASONING", frame_elapsed, raw)
+                    continue
+
+                if body_type == "TOOL_RESULT":
+                    logger.debug("[%s] Chat TOOL_RESULT frame received.", email)
+                    self._log_chat_message("RECV", "TOOL_RESULT", frame_elapsed, raw)
+                    continue
+
+                if body_type == "PROMPT_STATUS" and body_message == "ENDED":
+                    self._log_chat_message("RECV", "ENDED", frame_elapsed, raw)
+                    ended = True
+                    break
+
+                # Anything else: still log it so the transcript is complete.
+                self._log_chat_message("RECV", body_type or "UNKNOWN", frame_elapsed, raw)
+        except Exception as exc:
+            chat_exc = exc
+            logger.error("[%s] Chat WebSocket error: %s", email, exc)
+            self._log_chat_message(
+                "SYS", "ERROR", time.monotonic() - t_send, str(exc),
+            )
+        finally:
+            try:
+                ws.close()
+            except Exception:
+                pass
+
+        if ended:
+            self._fire_chat_metric("[Chat] full_response", t_send)
+            self._log_chat_message(
+                "SYS", "DONE", time.monotonic() - t_send, "status=SUCCESS",
+            )
+        else:
+            self._fire_chat_metric(
+                "[Chat] full_response", t_send,
+                chat_exc or Exception("Chat call did not complete"),
+            )
+            self._log_chat_message(
+                "SYS", "DONE", time.monotonic() - t_send,
+                f"status=FAILED error={chat_exc}",
+            )
 
 
 # ---------------------------------------------------------------------------
