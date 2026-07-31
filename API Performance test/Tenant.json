@@ -1,0 +1,9 @@
+[
+    {
+        "Description": "Description",
+        "ID": "42d37e6e-2a53-4093-95b7-86c1aa5e3c32",
+        "Name": "Perf Test Tenant 1",
+        "ParentOrganizationId": "b173f8aa-5bd4-4672-be6e-499cf382f40b",
+        "TenantType": null
+    }
+]
