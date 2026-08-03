@@ -42,6 +42,7 @@ from dotenv import load_dotenv
 from locust import HttpUser, constant, events, task
 from locust.exception import StopUser
 from locust.runners import STATE_CLEANUP, STATE_STOPPED, STATE_STOPPING, WorkerRunner
+from locust.stats import CSV_STATS_FLUSH_INTERVAL_SEC, CSV_STATS_INTERVAL_SEC
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -220,6 +221,9 @@ def _load_tenants(path: Path) -> Dict[str, Dict[str, Any]]:
 # working unchanged.
 QUERIES: List[str] = []
 TENANTS: Dict[str, Dict[str, Any]] = {}
+# Every chat call sends all Tenant.json tenants, so this is built once here
+# rather than per-user/per-call.
+ALL_TENANT_SCOPE: List[Dict[str, str]] = []
 if _CHAT_ENABLED:
     _queries_raw: str = str(_chat_cfg.get("queries_file", "./chat_queries.txt"))
     _queries_path = Path(_queries_raw)
@@ -232,6 +236,9 @@ if _CHAT_ENABLED:
     if not _tenants_path.is_absolute():
         _tenants_path = (_HERE / _tenants_path).resolve()
     TENANTS = _load_tenants(_tenants_path)
+    ALL_TENANT_SCOPE = [
+        {entry["ID"]: entry["Name"]} for entry in TENANTS.values() if entry.get("ID")
+    ]
 
 # ---------------------------------------------------------------------------
 # Thread-safe round-robin user assignment
@@ -938,10 +945,9 @@ class MontyCloudUser(HttpUser):
     # OrganizationId (WS URL query param) stays as self._org_id, the signed-in
     # user's own org fetched via /auth/user during sign-in — same as Home
     # Page/WAFR/Health. The `tenant_scope` in the message body is different:
-    # it's looked up from Tenant.json (config: chat.tenants_file) by exact
-    # match against this user's `Tenant` column value in users.csv, since the
-    # chat bot's tenant scoping uses a tenant-specific org id, not the user's
-    # own root org.
+    # it always lists every tenant from Tenant.json (config: chat.tenants_file),
+    # regardless of which user is running — the chat bot's tenant scoping uses
+    # tenant-specific org ids, not the user's own root org.
 
     def _fire_chat_metric(
         self,
@@ -987,25 +993,8 @@ class MontyCloudUser(HttpUser):
         if not QUERIES:
             logger.error("[%s] No chat queries loaded; skipping Chat flow.", email)
             return
-
-        # Look up this user's tenant-specific org id + display name by exact
-        # match against Tenant.json's `Name` field. No fallback to
-        # self._org_id — skip the call and log an error if there's no match.
-        tenant_key = self._creds.get("Tenant", "")
-        tenant_entry = TENANTS.get(tenant_key)
-        if not tenant_entry:
-            logger.error(
-                "[%s] No Tenant.json entry found for Tenant=%r; skipping Chat flow.",
-                email, tenant_key,
-            )
-            return
-        tenant_id = tenant_entry.get("ID", "")
-        tenant_name = tenant_entry.get("Name", tenant_key)
-        if not tenant_id:
-            logger.error(
-                "[%s] Tenant.json entry for Tenant=%r has no 'ID'; skipping Chat flow.",
-                email, tenant_key,
-            )
+        if not ALL_TENANT_SCOPE:
+            logger.error("[%s] No tenants loaded from Tenant.json; skipping Chat flow.", email)
             return
 
         url = (
@@ -1040,7 +1029,7 @@ class MontyCloudUser(HttpUser):
                 "top_p": _CHAT_TOP_P,
                 "top_k": _CHAT_TOP_K,
             },
-            "tenant_scope": [{tenant_id: tenant_name}],
+            "tenant_scope": ALL_TENANT_SCOPE,
         }
 
         t_send = time.monotonic()
@@ -1245,6 +1234,13 @@ def on_test_stop(environment, **kwargs) -> None:
             "Pass --csv reports/stats to enable it."
         )
         return
+
+    # Locust's CSV writer is a background greenlet that only rewrites the file
+    # every CSV_STATS_INTERVAL_SEC and flushes it to disk every
+    # CSV_STATS_FLUSH_INTERVAL_SEC — wait a full cycle so the very last stat
+    # (e.g. a [Chat] full_response fired right before the test stopped) is
+    # guaranteed to be on disk before we read it below.
+    gevent.sleep(CSV_STATS_INTERVAL_SEC + CSV_STATS_FLUSH_INTERVAL_SEC + 1)
 
     stats_csv = Path(csv_prefix + "_stats.csv")
     if not stats_csv.exists():
