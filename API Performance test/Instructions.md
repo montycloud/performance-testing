@@ -26,9 +26,9 @@ python3 -m locust -f locustfile.py --headless --users N --spawn-rate R \
 | `locustfile.py` | Everything: config/CSV bootstrap at module load, the `MontyCloudUser` class, all flow methods, and the `on_test_stop` hook that auto-generates the custom HTML report. |
 | `config.yaml` | All tunables — API base URL, users CSV path, run mode/iterations, think times, and per-flow `health:`/`chat:` sections (`enabled`/`mode` toggles). |
 | `report_generator.py` | Reads Locust's `--csv` stats output and renders a sectioned custom HTML report (`reports/custom_<name>_<ts>.html`), bucketing rows by their `[Prefix]` in the request `name`. |
-| `users.csv` | Test user credentials (`Name,Email,Password,New Password,Tenant`). `Tenant` must exactly match a `Name` in `Tenant.json` for the Chat flow to find that user's tenant-specific org id. |
+| `users.csv` | Test user credentials (`Name,Email,Password,New Password,Tenant`). The `Tenant` column is no longer read by the Chat flow. |
 | `chat_queries.txt` | Plain-text prompts for the Chat flow, one per line. |
-| `Tenant.json` | User-provided list of `{ID, Name, ...}` tenant entries; looked up by `Name` to get the tenant-specific org id used in the Chat flow's `tenant_scope`. |
+| `Tenant.json` | User-provided list of `{ID, Name, ...}` tenant entries; **all** entries are sent in every chat call's `tenant_scope` (built once at module load, not per-user). |
 
 ## The five flows (all in `MontyCloudUser`)
 
@@ -54,10 +54,10 @@ and `report_generator.py` can bucket them into sections.
    `PROMPT_STATUS: ENDED` (or `chat.timeout_seconds`), closes.
    Multi-turn-on-one-connection is a known deferred item. The WS URL's
    `OrganizationId` param is `self._org_id` (signed-in user's own org, same
-   as Home/WAFR/Health) but the message body's `tenant_scope` uses a
-   *different*, tenant-specific id looked up from `Tenant.json` by exact
-   match against `self._creds["Tenant"]` — if no match, the call is skipped
-   and an error logged (no fallback to `self._org_id`).
+   as Home/WAFR/Health) but the message body's `tenant_scope` always lists
+   *every* tenant from `Tenant.json` (`ALL_TENANT_SCOPE`, built once at
+   module load) — not a per-user lookup; skipped only if `Tenant.json` yields
+   zero entries.
 
 `full_journey()` (the single `@task`) decides which flows run and in what
 order, based on `_CHAT_ENABLED`/`_CHAT_MODE`/`_HEALTH_ENABLED`/`_HEALTH_MODE`.
@@ -100,10 +100,10 @@ one:
   `_chat_flow()` is strictly one-query-per-connection. If implemented later,
   prefer a dedicated `chat.turns_per_connection` config key over overloading
   `test.iterations` (see WEBSOCKET_CHAT_APPROACH.md for why).
-- Chat's `tenant_scope` requires `users.csv`'s `Tenant` column to *exactly*
-  match a `Name` entry in `Tenant.json` (config: `chat.tenants_file`). No
-  fuzzy matching — mismatches skip the chat call with a logged error rather
-  than silently falling back to `self._org_id`.
+- Chat's `tenant_scope` sends **all** entries from `Tenant.json` (config:
+  `chat.tenants_file`) on every call; `users.csv`'s `Tenant` column is no
+  longer used for this. The call is skipped only if `Tenant.json` has zero
+  usable entries.
 - **Branch caveat (learned 2026-07-30)**: `locustfile.py`, `config.yaml`,
   `report_generator.py`, `requirements.txt`, and `README.md` are tracked by
   git — switching branches changes their content. `chat_queries.txt`,

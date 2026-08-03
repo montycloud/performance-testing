@@ -52,7 +52,7 @@ cp .env.example .env
 | `chat.mode` | `appended` | `appended` (...WAFR/Health → think time → Chat) or `standalone` (Signin → think time → Chat only) |
 | `chat.ws_base_url` | `""` | WebSocket endpoint, e.g. `wss://<id>.execute-api.<region>.amazonaws.com/<stage>` |
 | `chat.queries_file` | `./chat_queries.txt` | Plain-text file, one chat prompt per line; a random line is picked per chat call |
-| `chat.tenants_file` | `./Tenant.json` | JSON list of `{ID, Name, ...}` tenant entries, used to look up the tenant-specific org id for `tenant_scope` |
+| `chat.tenants_file` | `./Tenant.json` | JSON list of `{ID, Name, ...}` tenant entries; **all** entries are sent in every chat call's `tenant_scope` |
 | `chat.model_id` / `temperature` / `top_p` / `top_k` | see config.yaml | Metadata sent with every chat query |
 | `chat.timeout_seconds` | `120` | Max time to wait for the `PROMPT_STATUS: ENDED` frame before failing the call |
 | `chat.transcript_log` | `./reports/chat_transcript.log` | Optional per-message transcript log; blank disables it |
@@ -248,15 +248,14 @@ Each chat call:
    JWT (`Authorization`) and `OrganizationId` (the signed-in user's own org,
    fetched via `/auth/user` during sign-in — same as the Home Page flow) as
    query params, plus `agentic=true`.
-2. Looks up this user's tenant-specific org id + display name from
-   `chat.tenants_file` (default `Tenant.json`) by matching the `Tenant` column
-   in `users.csv` **exactly** against an entry's `Name` field. If there's no
-   match, the chat call is skipped for that user and an error is logged —
-   there's no fallback to the signed-in user's own org for this.
+2. Loads every tenant entry from `chat.tenants_file` (default `Tenant.json`) —
+   this happens once at startup, not per-user.
 3. Sends one query — picked at random from `chat.queries_file` — with an empty
    `thread_id` (a new conversation), `metadata`
    (`model_id`/`temperature`/`top_p`/`top_k` from config.yaml), and
-   `tenant_scope` keyed by the looked-up tenant id/name from step 2.
+   `tenant_scope` containing **all** tenants from `Tenant.json` (e.g.
+   `[{id1: name1}, {id2: name2}, ...]`) — every user's chat call sends the
+   same full set, regardless of `users.csv`.
 4. Streams frames until a `PROMPT_STATUS: ENDED` frame arrives, or
    `chat.timeout_seconds` elapses.
 5. Closes the connection.
@@ -264,8 +263,8 @@ Each chat call:
 > **Note the two different org ids in play:** the WebSocket URL's
 > `OrganizationId` query param is always the signed-in user's own org
 > (`self._org_id`, same value used by Home Page/WAFR/Health). The `tenant_scope`
-> in the message body is a *different*, tenant-specific id looked up from
-> `Tenant.json` — this is intentional, not a bug.
+> in the message body lists tenant-specific ids from `Tenant.json` instead —
+> this is intentional, not a bug.
 
 Two metrics are recorded into Locust's stats under the `[Chat]` prefix:
 
@@ -303,7 +302,7 @@ elapsed time since the query was sent. Leave it blank to disable.
 | Connection errors | Wrong `base_url` | Check `api.base_url` in `config.yaml` |
 | `chat.ws_base_url is not configured` | `chat.enabled: true` but `ws_base_url` blank | Set `chat.ws_base_url` in `config.yaml` |
 | `No chat queries loaded` | `chat_queries.txt` missing or empty | Check `chat.queries_file` path and that the file has at least one non-comment line |
-| `No Tenant.json entry found for Tenant=...` | `users.csv`'s `Tenant` value doesn't exactly match any `Name` in `Tenant.json` | Update `users.csv`'s `Tenant` column to match `Tenant.json`'s `Name` field exactly |
+| `No tenants loaded from Tenant.json` | `Tenant.json` is missing, empty, or has no entries with an `ID` | Check `chat.tenants_file` path and that `Tenant.json` has at least one valid entry |
 | Chat call times out (`No PROMPT_STATUS/ENDED frame within Ns`) | Backend took longer than `chat.timeout_seconds`, or connection dropped | Increase `chat.timeout_seconds`; check `ws_base_url`/token validity |
 
 ---
@@ -316,7 +315,7 @@ API Performance test/
 ├── config.yaml            Test configuration
 ├── report_generator.py    Custom HTML report builder
 ├── chat_queries.txt       Chat prompts (one per line) used by the Chat flow
-├── Tenant.json            Tenant name -> org id lookup used by the Chat flow
+├── Tenant.json            Tenant entries; all are sent in every chat call's tenant_scope
 ├── requirements.txt       Python dependencies
 ├── README.md              This file
 ├── WEBSOCKET_CHAT_APPROACH.md   Design notes for the Chat/WebSocket flow
