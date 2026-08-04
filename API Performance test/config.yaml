@@ -16,10 +16,10 @@ test:
   # Locust --users controls concurrency; user_count controls which credentials are used.
   # Example: user_count=10 + --users 10  → 10 unique users, each gets a unique credential
   #          user_count=10 + --users 20  → 10 credentials recycled round-robin at 20 concurrency
-  user_count: 7
+  user_count: 50
 
   # Default spawn rate (users/second). Override via locust --spawn-rate N
-  spawn_rate: 7
+  spawn_rate: 50
 
   # Default run time. Override via locust --run-time <value>
   run_time: "5m"
@@ -41,25 +41,24 @@ test:
   # Human-readable description of this test run (appears at the top of the HTML report).
   # Describe the scenario: e.g. number of users, iterations, what is being measured.
   description: |
-    Baseline Test 
-    Multi Tenants Single Joruney ( 7 Standalone Tenants with 1 users each)
-    Number of Users - 7 ( 1 user accesing there own Tenant)
-    Mode : Single User Journey
-    Email: perftestuser1@montycloud.com - perftestuser4@montycloud.com and user51-74
-    Tenant: There are 7 tenants each having 4 users and each tenant has 2 AWS accounts
+    Test: Post Fixation and deployment to Stage 3Aug
+    Health Events Standalone Flow
+    Number of Users - 50
+    Mode : Iteration Mode ( 50 Users Doing 20 Iterations Single Signin) 
+    Email: perftestuser1@montycloud.com - perftestuser50@montycloud.com
+    Tenant: User has access to 1 Tenant which has 2 AWS accounts,
+    Total Resources: 741
     AWS Accounts: 398370181389 and 016257615686
-    16257615686 398370181389 956565059625 174689657125 512438353072 255445075565 615471834779 698172256803 422653420161 809809510687 210806259040 347694271060 495331821755 720035686509
-    No Org account in this TEST
-    1 WAFR scan each account with approx 2LAC findings
+    Total Findings: 5.49K
     
   # Name used in the custom report filename: custom_<report_name>_<timestamp>.html
   # Use snake_case or hyphens; avoid spaces. Leave blank to use default "report".
 
-  report_name: "report_multi_tenant_users_7_run_single_journey_run_3"
+  report_name: "report_Health_events_users_50_run_20_terations__3Aug"
   # Number of full journeys each user completes in single_journey mode
   # before stopping. Example: --users 1 + iterations: 20 → one user runs
   # the journey 20 times back-to-back. Ignored in timed mode.
-  iterations: 1
+  iterations: 20
 
   # Think time (seconds) between the Home Page and WAFR Page flows.
   # Each iteration sleeps a random duration in [think_time_min, think_time_max].
@@ -79,7 +78,7 @@ test:
 health:
   # false (default) = Health Events calls never run; behaviour is identical
   # to before this feature was added.
-  enabled: false
+  enabled: true
 
   # mode controls how the Health Events flow fits into the user journey:
   #
@@ -89,5 +88,5 @@ health:
   #   standalone  – Signin -> think time -> Health only.
   #                 Skips Home Page and WAFR entirely for this run.
   #
-  mode: "appended"
+  mode: "standalone"
 
