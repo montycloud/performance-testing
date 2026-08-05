@@ -1110,6 +1110,19 @@ class MontyCloudUser(HttpUser):
                     self._log_chat_message("RECV", "PROMPT_ERROR", frame_elapsed, raw)
                     break
 
+                # Top-level PROMPT_STATUS/REJECTED (e.g. SESSION_TIME_LIMIT_REACHED)
+                # — "message" is the string "REJECTED" rather than an ERROR dict.
+                # Also terminal: fail fast with the server's own reason instead of
+                # waiting out the full timeout.
+                if frame.get("type") == "PROMPT_STATUS" and top_message == "REJECTED":
+                    chat_exc = RuntimeError(
+                        f"Chat PROMPT_STATUS REJECTED "
+                        f"(code={frame.get('code')}): {frame.get('display_message') or frame.get('code')}"
+                    )
+                    logger.error("[%s] Chat rejected: %s", email, chat_exc)
+                    self._log_chat_message("RECV", "PROMPT_REJECTED", frame_elapsed, raw)
+                    break
+
                 body = frame.get("body") if isinstance(frame.get("body"), dict) else {}
                 body_type = body.get("type")
                 body_message = body.get("message")

@@ -165,6 +165,62 @@ locust -f locustfile.py --headless \
 
 ---
 
+## Running multiple chat-query executions (sweep)
+
+To run the chat test back-to-back across several different `chat_queries` files
+(e.g. different query "types") — same users/concurrency every time, only the
+queries file and description changing — use `run_chat_executions.py` instead of
+editing `config.yaml` by hand for each run.
+
+It reads a manifest (default `executions.yaml`), and for each entry temporarily
+overwrites `config.yaml` with that entry's `chat.queries_file` / `test.description`
+/ `test.report_name`, runs `locust` headlessly, then restores the **original**
+`config.yaml` once the whole sweep finishes (or is interrupted) — so nothing is
+permanently changed in tracked files.
+
+```bash
+# Validate the manifest without running anything or touching config.yaml
+python3 run_chat_executions.py --dry-run
+
+# Run the sweep (uses ./executions.yaml by default)
+python3 run_chat_executions.py
+
+# Use a different manifest (e.g. per pipeline stage)
+python3 run_chat_executions.py --manifest sweeps/my_sweep.yaml
+```
+
+`executions.yaml` schema:
+
+```yaml
+run:                       # shared across every execution — "users stay the same"
+  users: 1
+  spawn_rate: 1
+  run_time: ""             # blank = rely on single_journey auto-stop
+
+executions:
+  - name: net_cost_2_months       # used to suffix every output file
+    queries_file: "./chat_queries_net_cost.txt"
+    description: |
+      AI Conversation Chat — Tenant Net Cost Report query set
+```
+
+Each execution's `name` suffixes all of its output files so nothing gets
+overwritten between runs:
+
+| Output | Path |
+|--------|------|
+| Custom HTML report | `reports/custom_<name>_<timestamp>.html` |
+| Locust HTML report | `reports/locust_report_<name>.html` |
+| Locust CSV stats | `reports/stats_<name>_*.csv` |
+| Chat transcript log | `reports/chat_transcript_<name>.log` |
+
+Exits non-zero if any execution's locust run failed, so it can be used
+directly as a single CI/pipeline step. Runs are sequential within one checkout
+(they share the same `config.yaml`); parallel pipeline jobs get their own
+workspace so this isn't a constraint across jobs.
+
+---
+
 ## Reports
 
 After the test completes, two reports are available:

@@ -29,6 +29,8 @@ python3 -m locust -f locustfile.py --headless --users N --spawn-rate R \
 | `users.csv` | Test user credentials (`Name,Email,Password,New Password,Tenant`). The `Tenant` column is no longer read by the Chat flow. |
 | `chat_queries.txt` | Plain-text prompts for the Chat flow, one per line. |
 | `Tenant.json` | User-provided list of `{ID, Name, ...}` tenant entries; **all** entries are sent in every chat call's `tenant_scope` (built once at module load, not per-user). |
+| `executions.yaml` | Manifest for `run_chat_executions.py` — a list of `{name, queries_file, description}` runs sharing one `users`/`spawn_rate`/`run_time` block. |
+| `run_chat_executions.py` | Standalone sweep runner — see "Chat-query sweep runner" section below. Does **not** modify `locustfile.py`/`report_generator.py`. |
 
 ## The five flows (all in `MontyCloudUser`)
 
@@ -52,6 +54,10 @@ and `report_generator.py` can bucket them into sections.
    **Currently one query per call** — opens a connection, sends one query
    (with an empty `thread_id`, i.e. always a new conversation), waits for
    `PROMPT_STATUS: ENDED` (or `chat.timeout_seconds`), closes.
+   Two terminal top-level `PROMPT_STATUS` frames fail the call immediately
+   instead of waiting out the timeout: `message` as an `{"message": "ERROR"}`
+   dict, and `message == "REJECTED"` (e.g. `code: SESSION_TIME_LIMIT_REACHED`)
+   — the latter's `display_message`/`code` are surfaced in the failure reason.
    Multi-turn-on-one-connection is a known deferred item. The WS URL's
    `OrganizationId` param is `self._org_id` (signed-in user's own org, same
    as Home/WAFR/Health) but the message body's `tenant_scope` always lists
@@ -92,6 +98,34 @@ one:
    `_throughput_section_html()`, and `_full_html()`'s section list — plus a
    `.dot-yourflow` / `.section-title.yourflow` CSS pair.
 6. Document the new config keys and flow behavior in `README.md`.
+
+## Chat-query sweep runner (`run_chat_executions.py`)
+
+Added to run the chat test across multiple `chat_queries` files/descriptions
+back-to-back without ever touching `locustfile.py`/`report_generator.py` and
+without leaving a lasting diff in `config.yaml`. Design:
+
+- `_CONFIG_FILE` in `locustfile.py` is hardcoded to `config.yaml` next to it
+  (no env-var override) — deliberately left untouched per a "zero impact to
+  existing code" requirement.
+- Instead, `run_chat_executions.py` reads `executions.yaml`, and per entry:
+  backs up `config.yaml`'s raw text, `yaml.safe_dump`s a modified copy over it
+  (`chat.queries_file`, `test.description`, `test.report_name`,
+  `chat.transcript_log` overridden; everything else inherited from the base
+  config), shells out to `locust -f locustfile.py --headless ...` exactly like
+  a manual run, then restores the original `config.yaml` bytes in a
+  `try/finally` (+ SIGINT/SIGTERM handlers) once the whole sweep ends.
+- A `config.yaml.sweep-backup` sentinel file guards against double-mutation if
+  a previous sweep crashed before restoring; the script refuses to start if it
+  finds one.
+- Runs are necessarily sequential within one checkout (shared `config.yaml`);
+  don't try to parallelize a sweep in the same working directory.
+- `yaml.safe_dump` strips `config.yaml`'s inline comments while a run is in
+  flight (comments come back once the original text is restored) — cosmetic,
+  not a bug.
+
+See the README's "Running multiple chat-query executions (sweep)" section for
+usage.
 
 ## Known deferred work / open items
 
