@@ -11,78 +11,81 @@
 # directory (or absolute).
 
 # Shared across every execution in this sweep ("users remain the same").
+# NOTE: users.csv must have at least `users` rows of distinct credentials —
+# config.yaml's test.user_count must also be >= this value (see README's
+# "user_count vs --users" table) so each concurrent user gets a unique login.
 run:
-  users: 1
-  spawn_rate: 1
+  users: 2
+  spawn_rate: 2
   run_time: ""   # blank = rely on single_journey mode's auto-stop (see config.yaml)
 
 executions:
   # Runnable out of the box — reuses the existing sample queries file twice
   # under different names so you can dry-run/verify the sweep mechanics.
-  - name: report_AI_Chat_User_1_Tenants_3_High_Query_wafr_1
+  - name: report_AI_Chat_User_2_Tenants_3_High_Query_wafr_1
     queries_file: "./chat_queries/chat_queries_wafr_1.txt"
     description: |
       AI Chat, 
-      Parallel User: 1
+      Parallel User: 2
       Tenants 3  ( MSP ,Tenant 1 and Tenant 2 )
       Extract findings data for Selected Tenant(s) and assessment "Default WAFR Scan
       
 
-  - name: report_AI_Chat_User_1_Tenants_3_Medium_Query_wafr_2
+  - name: report_AI_Chat_User_2_Tenants_3_Medium_Query_wafr_2
     queries_file: "./chat_queries/chat_queries_wafr_2.txt"
     description: |
       AI Chat, 
-      Parallel User: 1
+      Parallel User: 2
       Tenants 3  ( MSP ,Tenant 1 and Tenant 2 )
       Get the Critical Severity finding counts for the Security pillar across all assessments in selected Tenant's
 
-  - name: report_AI_Chat_User_1_Tenants_3_Medium_Query_wafr_3
+  - name: report_AI_Chat_User_2_Tenants_3_Medium_Query_wafr_3
     queries_file: "./chat_queries/chat_queries_wafr_3.txt"
     description: |
       AI Chat, 
-      Parallel User: 1
+      Parallel User: 2
       Tenants 3  ( MSP ,Tenant 1 and Tenant 2 )
       Get the Critical Severity finding counts for the Cost Optimization pillar across all assessments in selected Tenant's
 
-  - name: report_AI_Chat_User_1_Tenants_3_Medium_Query_wafr_4
+  - name: report_AI_Chat_User_2_Tenants_3_Medium_Query_wafr_4
     queries_file: "./chat_queries/chat_queries_wafr_4.txt"
     description: |
       AI Chat, 
-      Parallel User: 1
+      Parallel User: 2
       Tenants 3  ( MSP ,Tenant 1 and Tenant 2 )
       Show me the Top Violating Checks from "Default WAFR" assessment across the Pillars for selected Tenant
 
 
-  - name: report_AI_Chat_User_1_Tenants_3_Medium_Query_wafr_5
+  - name: report_AI_Chat_User_2_Tenants_3_Medium_Query_wafr_5
     queries_file: "./chat_queries/chat_queries_wafr_5.txt"
     description: |
       AI Chat, 
-      Parallel User: 1
+      Parallel User: 2
       Tenants 3  ( MSP ,Tenant 1 and Tenant 2 )
       Get the Critical and High Severity finding counts for the Operational Excellence pillar across all assessments in selected Tenant's
 
-  - name: report_AI_Chat_User_1_Tenants_3_Medium_Query_wafr_6
+  - name: report_AI_Chat_User_2_Tenants_3_Medium_Query_wafr_6
     queries_file: "./chat_queries/chat_queries_wafr_6.txt"
     description: |
       AI Chat, 
-      Parallel User: 1
+      Parallel User: 2
       Tenants 3  ( MSP ,Tenant 1 and Tenant 2 )
       Get the Critical and High Severity finding counts for the Reliability pillar across all assessments in selected Tenant's,
 
-  - name: report_AI_Chat_User_1_Tenants_3_low_Query_wafr_7
+  - name: report_AI_Chat_User_2_Tenants_3_low_Query_wafr_7
     queries_file: "./chat_queries/chat_queries_wafr_7.txt"
     description: |
       AI Chat, 
-      Parallel User: 1
+      Parallel User: 2
       Tenants 3  ( MSP ,Tenant 1 and Tenant 2 )
       Get the Critical and High Severity finding counts for the Performance Efficiency pillar across all assessments in selected Tenant's
 
 
-  - name: report_AI_Chat_User_1_Tenants_3_Medium_Query_wafr_8
+  - name: report_AI_Chat_User_2_Tenants_3_Medium_Query_wafr_8
     queries_file: "./chat_queries/chat_queries_wafr_8.txt"
     description: |
       AI Chat, 
-      Parallel User: 1
+      Parallel User: 2
       Tenants 3  ( MSP ,Tenant 1 and Tenant 2 )
       Get the Critical and High Severity finding counts for the Sustainability pillar across all assessments in selected Tenant's
 
