@@ -31,7 +31,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import gevent
 import gevent.pool
@@ -127,6 +127,8 @@ _CHAT_MODEL_ID: str = str(_chat_cfg.get("model_id", ""))
 _CHAT_TEMPERATURE: float = float(_chat_cfg.get("temperature", 0.1))
 _CHAT_TOP_P: float = float(_chat_cfg.get("top_p", 1))
 _CHAT_TOP_K: int = int(_chat_cfg.get("top_k", 250))
+# Max number of "yes Continue" retries per chat call when SESSION_TIME_LIMIT_REACHED.
+_CHAT_MAX_SESSION_RETRIES: int = int(_chat_cfg.get("max_session_retries", 5))
 
 if _CHAT_ENABLED and _HEALTH_ENABLED and _CHAT_MODE == "standalone" and _HEALTH_MODE == "standalone":
     logger.warning(
@@ -265,6 +267,24 @@ def _claim_user() -> Dict[str, str]:
 _completed_journeys = 0
 _completed_journeys_lock = threading.Lock()
 
+# ---------------------------------------------------------------------------
+# Session-timeout continuation tracking (thread-safe)
+# ---------------------------------------------------------------------------
+# Per-user count of how many times the chat was continued after receiving
+# SESSION_TIME_LIMIT_REACHED.  Keyed by user email; populated at the end of
+# each user's chat call so the test_stop hook can write it to a sidecar file
+# and the report generator can render it.
+_session_timeout_stats: Dict[str, int] = {}
+_session_timeout_stats_lock = threading.Lock()
+
+
+def _record_user_session_timeouts(email: str, count: int) -> None:
+    """Accumulate *count* session-timeout continuations for *email*."""
+    if count == 0:
+        return
+    with _session_timeout_stats_lock:
+        _session_timeout_stats[email] = _session_timeout_stats.get(email, 0) + count
+
 
 # ---------------------------------------------------------------------------
 # Locust User class
@@ -294,6 +314,7 @@ class MontyCloudUser(HttpUser):
         self._token: Optional[str] = None
         self._org_id: str = ""
         self._iterations_done: int = 0
+        self._session_timeout_continuations: int = 0
         # Enlarge the connection pool so the largest parallel batch (28 calls
         # in WAFR Batch 2) never discards connections.  pool_connections=1
         # because we talk to a single host; pool_maxsize=50 gives headroom.
@@ -985,44 +1006,47 @@ class MontyCloudUser(HttpUser):
             email, direction, category, elapsed_s, detail,
         )
 
-    def _chat_flow(self) -> None:
-        email = self._creds.get("Email", "unknown")
-        if not WS_BASE_URL:
-            logger.error("[%s] chat.ws_base_url is not configured; skipping Chat flow.", email)
-            return
-        if not QUERIES:
-            logger.error("[%s] No chat queries loaded; skipping Chat flow.", email)
-            return
-        if not ALL_TENANT_SCOPE:
-            logger.error("[%s] No tenants loaded from Tenant.json; skipping Chat flow.", email)
-            return
+    def _run_chat_ws(
+        self,
+        url: str,
+        query: str,
+        thread_id: str,
+        email: str,
+        attempt: int,
+    ) -> Tuple[bool, Optional[BaseException], Optional[str]]:
+        """Open a WebSocket, send *query*, and read frames until ENDED or error.
 
-        url = (
-            f"{WS_BASE_URL}?Authorization={self._token}"
-            f"&OrganizationId={self._org_id}&agentic=true"
-        )
-
+        Returns a 3-tuple:
+            ended (bool)
+                True when PROMPT_STATUS/ENDED was received cleanly.
+            exception (Optional[BaseException])
+                Set on any non-session-timeout failure; None on success or when
+                a session timeout signals a retry.
+            session_timeout_thread_id (Optional[str])
+                Non-None only when PROMPT_STATUS/REJECTED with code
+                SESSION_TIME_LIMIT_REACHED is received.  The value is the
+                ``thread_id`` from that rejection frame, to be used in the
+                follow-up "yes Continue" call.
+        """
         connect_start = time.monotonic()
         try:
             ws = websocket.create_connection(url, timeout=_CHAT_TIMEOUT)
         except Exception as exc:
-            logger.error("[%s] Chat WebSocket connect failed: %s", email, exc)
+            logger.error("[%s] Chat WebSocket connect failed (attempt %d): %s", email, attempt, exc)
             self._log_chat_message(
                 "SYS", "CONNECT_FAIL", time.monotonic() - connect_start,
-                f"url={_redact_ws_url(url)} error={exc}",
+                f"attempt={attempt} url={_redact_ws_url(url)} error={exc}",
             )
-            self._fire_chat_metric("[Chat] full_response", connect_start, exc)
-            return
+            return False, exc, None
 
         self._log_chat_message(
             "SYS", "CONNECTED", time.monotonic() - connect_start,
-            f"url={_redact_ws_url(url)}",
+            f"attempt={attempt} url={_redact_ws_url(url)}",
         )
 
-        query = random.choice(QUERIES)
         payload = {
             "query": query,
-            "thread_id": "",
+            "thread_id": thread_id,
             "metadata": {
                 "model_id": _CHAT_MODEL_ID,
                 "temperature": _CHAT_TEMPERATURE,
@@ -1036,10 +1060,11 @@ class MontyCloudUser(HttpUser):
         ttft_recorded = False
         ended = False
         chat_exc: Optional[BaseException] = None
+        session_timeout_thread_id: Optional[str] = None
 
         try:
             ws.send(json.dumps(payload))
-            self._log_chat_message("SEND", "QUERY", 0.0, query)
+            self._log_chat_message("SEND", "QUERY", 0.0, f"attempt={attempt} query={query}")
             deadline = t_send + _CHAT_TIMEOUT
             while True:
                 remaining = deadline - time.monotonic()
@@ -1047,10 +1072,10 @@ class MontyCloudUser(HttpUser):
                     chat_exc = TimeoutError(
                         f"No PROMPT_STATUS/ENDED frame within {_CHAT_TIMEOUT}s"
                     )
-                    logger.error("[%s] Chat timed out waiting for ENDED frame.", email)
+                    logger.error("[%s] Chat timed out waiting for ENDED frame (attempt %d).", email, attempt)
                     self._log_chat_message(
                         "RECV", "TIMEOUT", time.monotonic() - t_send,
-                        f"No ENDED frame within {_CHAT_TIMEOUT}s",
+                        f"attempt={attempt} No ENDED frame within {_CHAT_TIMEOUT}s",
                     )
                     break
 
@@ -1061,10 +1086,10 @@ class MontyCloudUser(HttpUser):
                     chat_exc = TimeoutError(
                         f"No PROMPT_STATUS/ENDED frame within {_CHAT_TIMEOUT}s"
                     )
-                    logger.error("[%s] Chat timed out waiting for ENDED frame.", email)
+                    logger.error("[%s] Chat timed out waiting for ENDED frame (attempt %d).", email, attempt)
                     self._log_chat_message(
                         "RECV", "TIMEOUT", time.monotonic() - t_send,
-                        f"No ENDED frame within {_CHAT_TIMEOUT}s",
+                        f"attempt={attempt} No ENDED frame within {_CHAT_TIMEOUT}s",
                     )
                     break
 
@@ -1097,9 +1122,7 @@ class MontyCloudUser(HttpUser):
 
                 # Top-level PROMPT_STATUS/ERROR (e.g. inaccessible tenant_scope
                 # org id) — no "body" wrapper, "message" is an object rather
-                # than a string. This is terminal: fail fast instead of
-                # waiting out the full timeout for a frame that will never
-                # arrive.
+                # than a string. Terminal: fail fast.
                 top_message = frame.get("message")
                 if frame.get("type") == "PROMPT_STATUS" and isinstance(top_message, dict) \
                         and top_message.get("message") == "ERROR":
@@ -1110,17 +1133,25 @@ class MontyCloudUser(HttpUser):
                     self._log_chat_message("RECV", "PROMPT_ERROR", frame_elapsed, raw)
                     break
 
-                # Top-level PROMPT_STATUS/REJECTED (e.g. SESSION_TIME_LIMIT_REACHED)
-                # — "message" is the string "REJECTED" rather than an ERROR dict.
-                # Also terminal: fail fast with the server's own reason instead of
-                # waiting out the full timeout.
+                # Top-level PROMPT_STATUS/REJECTED.
+                # SESSION_TIME_LIMIT_REACHED: signal the caller to retry with
+                # "yes Continue" on a fresh connection using the returned thread_id.
+                # Any other rejection code is a terminal failure.
                 if frame.get("type") == "PROMPT_STATUS" and top_message == "REJECTED":
-                    chat_exc = RuntimeError(
-                        f"Chat PROMPT_STATUS REJECTED "
-                        f"(code={frame.get('code')}): {frame.get('display_message') or frame.get('code')}"
-                    )
-                    logger.error("[%s] Chat rejected: %s", email, chat_exc)
+                    code = frame.get("code", "")
                     self._log_chat_message("RECV", "PROMPT_REJECTED", frame_elapsed, raw)
+                    if code == "SESSION_TIME_LIMIT_REACHED":
+                        session_timeout_thread_id = frame.get("thread_id", "")
+                        logger.warning(
+                            "[%s] SESSION_TIME_LIMIT_REACHED (attempt %d); thread_id=%s",
+                            email, attempt, session_timeout_thread_id,
+                        )
+                    else:
+                        chat_exc = RuntimeError(
+                            f"Chat PROMPT_STATUS REJECTED "
+                            f"(code={code}): {frame.get('display_message') or code}"
+                        )
+                        logger.error("[%s] Chat rejected: %s", email, chat_exc)
                     break
 
                 body = frame.get("body") if isinstance(frame.get("body"), dict) else {}
@@ -1156,9 +1187,9 @@ class MontyCloudUser(HttpUser):
                 self._log_chat_message("RECV", body_type or "UNKNOWN", frame_elapsed, raw)
         except Exception as exc:
             chat_exc = exc
-            logger.error("[%s] Chat WebSocket error: %s", email, exc)
+            logger.error("[%s] Chat WebSocket error (attempt %d): %s", email, attempt, exc)
             self._log_chat_message(
-                "SYS", "ERROR", time.monotonic() - t_send, str(exc),
+                "SYS", "ERROR", time.monotonic() - t_send, f"attempt={attempt} {exc}",
             )
         finally:
             try:
@@ -1166,21 +1197,97 @@ class MontyCloudUser(HttpUser):
             except Exception:
                 pass
 
+        return ended, chat_exc, session_timeout_thread_id
+
+    def _chat_flow(self) -> None:
+        """WebSocket chat flow with automatic SESSION_TIME_LIMIT_REACHED continuation.
+
+        Opens a WebSocket, sends a random query, and streams frames until
+        PROMPT_STATUS/ENDED.  If the server replies with SESSION_TIME_LIMIT_REACHED,
+        the current connection is closed and a new one is opened to send
+        ``"yes Continue"`` with the same thread_id, up to
+        ``chat.max_session_retries`` (default 5) times.  After that limit the
+        chat call is recorded as a failure.  Each successful continuation is
+        counted per-user and surfaced in the HTML report.
+        """
+        email = self._creds.get("Email", "unknown")
+        if not WS_BASE_URL:
+            logger.error("[%s] chat.ws_base_url is not configured; skipping Chat flow.", email)
+            return
+        if not QUERIES:
+            logger.error("[%s] No chat queries loaded; skipping Chat flow.", email)
+            return
+        if not ALL_TENANT_SCOPE:
+            logger.error("[%s] No tenants loaded from Tenant.json; skipping Chat flow.", email)
+            return
+
+        url = (
+            f"{WS_BASE_URL}?Authorization={self._token}"
+            f"&OrganizationId={self._org_id}&agentic=true"
+        )
+
+        t_flow_start = time.monotonic()
+        query = random.choice(QUERIES)
+        thread_id = ""          # empty for the first call; filled in on retry
+        session_continue_count = 0
+        ended = False
+        chat_exc: Optional[BaseException] = None
+
+        for attempt in range(_CHAT_MAX_SESSION_RETRIES + 1):
+            ended, chat_exc, session_timeout_thread_id = self._run_chat_ws(
+                url, query, thread_id, email, attempt,
+            )
+
+            if ended:
+                break
+
+            if session_timeout_thread_id is not None:
+                # SESSION_TIME_LIMIT_REACHED — attempt a continuation.
+                if attempt < _CHAT_MAX_SESSION_RETRIES:
+                    session_continue_count += 1
+                    thread_id = session_timeout_thread_id
+                    query = "yes Continue"
+                    logger.info(
+                        "[%s] Sending session continuation %d/%d (thread_id=%s).",
+                        email, session_continue_count, _CHAT_MAX_SESSION_RETRIES, thread_id,
+                    )
+                    self._log_chat_message(
+                        "SYS", "SESSION_CONTINUE",
+                        time.monotonic() - t_flow_start,
+                        f"continuation={session_continue_count}/{_CHAT_MAX_SESSION_RETRIES} "
+                        f"thread_id={thread_id}",
+                    )
+                    continue  # open a fresh WS for the next attempt
+                else:
+                    chat_exc = RuntimeError(
+                        f"SESSION_TIME_LIMIT_REACHED after {_CHAT_MAX_SESSION_RETRIES} "
+                        "continuation attempt(s)"
+                    )
+                    logger.error("[%s] Max session continuations reached (%d); failing.", email, _CHAT_MAX_SESSION_RETRIES)
+
+            # Non-session-timeout failure (or retries exhausted) — stop retrying.
+            break
+
+        # Accumulate per-user continuation counts for the report.
+        if session_continue_count > 0:
+            self._session_timeout_continuations += session_continue_count
+            _record_user_session_timeouts(email, session_continue_count)
+
         if ended:
-            self._fire_chat_metric("[Chat] full_response", t_send)
+            self._fire_chat_metric("[Chat] full_response", t_flow_start)
             self._log_chat_message(
-                "SYS", "DONE", time.monotonic() - t_send, "status=SUCCESS",
+                "SYS", "DONE", time.monotonic() - t_flow_start,
+                f"status=SUCCESS session_continuations={session_continue_count}",
             )
         else:
             self._fire_chat_metric(
-                "[Chat] full_response", t_send,
+                "[Chat] full_response", t_flow_start,
                 chat_exc or Exception("Chat call did not complete"),
             )
             self._log_chat_message(
-                "SYS", "DONE", time.monotonic() - t_send,
-                f"status=FAILED error={chat_exc}",
+                "SYS", "DONE", time.monotonic() - t_flow_start,
+                f"status=FAILED session_continuations={session_continue_count} error={chat_exc}",
             )
-
 
 # ---------------------------------------------------------------------------
 # Event hook: single_journey auto-exit
@@ -1264,6 +1371,23 @@ def on_test_stop(environment, **kwargs) -> None:
         )
         return
 
+    # Snapshot the per-user session-timeout continuation counts collected
+    # during this run and write a JSON sidecar alongside the stats CSV so
+    # the data survives even if report generation fails.
+    with _session_timeout_stats_lock:
+        session_timeout_snapshot = dict(_session_timeout_stats)
+
+    if session_timeout_snapshot:
+        import json as _json  # noqa: PLC0415
+        sidecar = Path(csv_prefix + "_session_timeouts.json")
+        try:
+            sidecar.write_text(
+                _json.dumps(session_timeout_snapshot, indent=2), encoding="utf-8"
+            )
+            logger.info("Session timeout stats  →  %s", sidecar)
+        except Exception as exc:
+            logger.warning("Could not write session timeout sidecar: %s", exc)
+
     # Ensure report_generator module in sys.path (same directory as this file)
     if str(_HERE) not in sys.path:
         sys.path.insert(0, str(_HERE))
@@ -1275,6 +1399,7 @@ def on_test_stop(environment, **kwargs) -> None:
             description=_test_cfg.get("description", ""),
             config_data=CFG,
             report_name=_test_cfg.get("report_name", ""),
+            session_timeout_stats=session_timeout_snapshot or None,
         )
         logger.info("Custom HTML report  →  %s", out)
     except Exception as exc:

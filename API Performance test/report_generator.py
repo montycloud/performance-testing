@@ -266,6 +266,41 @@ def _throughput_section_html(
     )
 
 
+
+def _session_timeout_section_html(session_timeout_stats: Dict[str, int]) -> str:
+    """Render a section showing per-user SESSION_TIME_LIMIT_REACHED continuation counts."""
+    if not session_timeout_stats:
+        return ""
+
+    total = sum(session_timeout_stats.values())
+    sorted_users = sorted(session_timeout_stats.items(), key=lambda kv: kv[1], reverse=True)
+
+    tbody_rows = []
+    for i, (email, count) in enumerate(sorted_users, 1):
+        tbody_rows.append(
+            f"<tr><td>{i}</td><td class='name'>{email}</td>"
+            f"<td style='font-weight:700;color:#b45309;'>{count}</td></tr>"
+        )
+
+    badge = f'<span class="badge" style="background:#b45309;color:#fff;">{total} total</span>'
+    return (
+        "<section>"
+        f'<div class="section-title" '
+        f'style="border-left-color:#b45309;background:#fffbeb;color:#78350f;">'
+        f"Session Timeout Continuations {badge}</div>"
+        "<p style='font-size:.82rem;color:#78350f;margin-bottom:12px;'>"
+        "Number of times each virtual user sent a <em>&ldquo;yes Continue&rdquo;</em> message "
+        "after receiving <code>SESSION_TIME_LIMIT_REACHED</code>. "
+        "These are <strong>not</strong> counted as failures; the chat session "
+        "resumed successfully each time.</p>"
+        "<div class='table-wrap'>"
+        "<table><thead><tr>"
+        "<th>#</th><th>User (email)</th><th>Continuations</th>"
+        f"</tr></thead><tbody>{''.join(tbody_rows)}</tbody></table></div>"
+        "</section>"
+    )
+
+
 def _critical_failures_section_html(all_data_rows: List[Dict]) -> str:
     """Return a highlighted section for endpoints above the failure/latency thresholds."""
     critical = []
@@ -467,6 +502,7 @@ def _full_html(
     aggregated_row: Optional[Dict],
     description: str = "",
     config_data: Optional[Dict] = None,
+    session_timeout_stats: Optional[Dict] = None,
 ) -> str:
     all_rows = auth_rows + home_rows + wafr_rows + health_rows + chat_rows
     overall = _summary_totals(all_rows)
@@ -493,6 +529,9 @@ def _full_html(
         tp_str  = "—"
         stp_str = "—"
 
+    _st_total = sum((session_timeout_stats or {}).values())
+    _st_users = len(session_timeout_stats or {})
+    _st_sub   = f"{_st_users} user(s) affected" if _st_total else "none this run"
     cards_html = "".join([
         _card("Total Requests",        overall["reqs"],  f"failures: {overall['fails']} ({overall['fail_pct']})"),
         _card("Test Duration",         dur_str,          f"total throughput: {tp_str}"),
@@ -502,6 +541,7 @@ def _full_html(
         _card("WAFR Page",             wafr_sum["reqs"], f"avg {wafr_sum['avg_rt']} · {wafr_sum['fail_pct']} fail"),
         _card("Health Events",         health_sum["reqs"], f"avg {health_sum['avg_rt']} · {health_sum['fail_pct']} fail"),
         _card("Chat",                  chat_sum["reqs"], f"avg {chat_sum['avg_rt']} · {chat_sum['fail_pct']} fail"),
+        _card("Session Continuations", str(_st_total),   _st_sub),
     ])
 
     def _section(title: str, css_class: str, rows: List[Dict], empty: str) -> str:
@@ -545,6 +585,7 @@ def _full_html(
   {_section("WAFR Page", "wafr", wafr_rows, "No [WAFR] data found.")}
   {_section("Health Events", "health", health_rows, "No [Health] data found.")}
   {_section("Chat", "chat", chat_rows, "No [Chat] data found.")}
+  {_session_timeout_section_html(session_timeout_stats or {})}
   {config_html}
 </main>
 <footer>MontyCloud Performance Testing Framework &nbsp;·&nbsp; {generated_at}</footer>
@@ -563,6 +604,7 @@ def generate(
     description: str = "",
     config_data: Optional[Dict] = None,
     report_name: str = "",
+    session_timeout_stats: Optional[Dict] = None,
 ) -> Path:
     """
     Parse *stats_csv* and write a custom HTML report.
@@ -581,6 +623,11 @@ def generate(
     report_name:
         Custom name segment; output file becomes ``custom_<report_name>_<ts>.html``.
         Falls back to ``custom_report_<ts>.html`` when blank.
+    session_timeout_stats:
+        Optional dict mapping user email to the number of "yes Continue" messages
+        sent due to SESSION_TIME_LIMIT_REACHED during the run.  Rendered as a
+        per-user table and a summary card in the report.  Pass ``None`` (or omit)
+        when no session timeouts occurred or chat was not enabled.
 
     Returns
     -------
@@ -628,6 +675,7 @@ def generate(
         aggregated_row,
         description=description,
         config_data=config_data,
+        session_timeout_stats=session_timeout_stats,
     )
     output.write_text(html, encoding="utf-8")
     return output

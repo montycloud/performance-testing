@@ -143,6 +143,12 @@ chat:
   # before marking the chat call as failed (timeout).
   timeout_seconds: 900
 
+  # Maximum number of times a chat call may automatically continue after
+  # receiving SESSION_TIME_LIMIT_REACHED.  On each retry the script sends
+  # "yes Continue" on a fresh WebSocket connection with the same thread_id.
+  # After this limit is reached the chat call is recorded as a failure.
+  max_session_retries: 5
+
   # Optional: path to a per-message transcript log (relative to this config
   # file, or absolute). Every frame sent/received on the WebSocket is
   # appended here with a timestamp and elapsed time since the query was
