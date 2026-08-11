@@ -55,6 +55,7 @@ cp .env.example .env
 | `chat.tenants_file` | `./Tenant.json` | JSON list of `{ID, Name, ...}` tenant entries; **all** entries are sent in every chat call's `tenant_scope` |
 | `chat.model_id` / `temperature` / `top_p` / `top_k` | see config.yaml | Metadata sent with every chat query |
 | `chat.timeout_seconds` | `120` | Max time to wait for the `PROMPT_STATUS: ENDED` frame before failing the call |
+| `chat.max_session_retries` | `5` | **Max automatic retries when server returns `SESSION_TIME_LIMIT_REACHED`** — each query gets up to N continuation attempts before failing |
 | `chat.transcript_log` | `./reports/chat_transcript.log` | Optional per-message transcript log; blank disables it |
 
 ### `user_count` vs `--users`
@@ -332,6 +333,40 @@ Two metrics are recorded into Locust's stats under the `[Chat]` prefix:
 An "Endpoint request timed out" frame (an informational AWS API Gateway notice,
 not part of the normal frame sequence) is logged as a **warning** and does not
 by itself fail the call — the read-loop keeps listening for further frames.
+
+### Handling Session Timeouts (SESSION_TIME_LIMIT_REACHED)
+
+When the server responds with a `SESSION_TIME_LIMIT_REACHED` rejection:
+
+```json
+{
+  "type": "PROMPT_STATUS",
+  "message": "REJECTED",
+  "code": "SESSION_TIME_LIMIT_REACHED",
+  "display_message": "Marvin has reached the time limit for this session. Do you want to continue?",
+  "thread_id": "..."
+}
+```
+
+The test framework **automatically retries** the chat flow instead of failing:
+
+1. **Detects** the `SESSION_TIME_LIMIT_REACHED` code in the rejection frame
+2. **Closes** the current WebSocket connection
+3. **Opens a new connection** and sends `{"query": "yes Continue", "thread_id": <from-rejection>, ...}` with the original tenant scope and metadata
+4. **Repeats** up to `chat.max_session_retries` times (default: 5 attempts per query)
+5. **Fails** the query if all retries are exhausted
+
+Each chat query gets its own independent retry budget (not shared across calls). The HTML report includes:
+- A **"Session Continuations"** summary card showing total retry count
+- A **detailed per-user table** showing how many continuations each user triggered
+
+Example config:
+```yaml
+chat:
+  max_session_retries: 5    # Allow up to 5 continuation attempts per query
+```
+
+The session timeout stats are also written to a JSON sidecar file (`<csv-prefix>_session_timeouts.json`) for archival.
 
 Set `chat.transcript_log` (default `./reports/chat_transcript.log`) to get a
 full per-message transcript — every frame sent/received, with a timestamp and
