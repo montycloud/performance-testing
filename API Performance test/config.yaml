@@ -141,7 +141,7 @@ chat:
 
   # Overall deadline (seconds) to wait for the PROMPT_STATUS "ENDED" frame
   # before marking the chat call as failed (timeout).
-  timeout_seconds: 900
+  timeout_seconds: 1500
 
   # Maximum number of times a chat call may automatically continue after
   # receiving SESSION_TIME_LIMIT_REACHED.  On each retry the script sends
