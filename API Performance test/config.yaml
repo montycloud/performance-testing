@@ -16,7 +16,7 @@ test:
   # Locust --users controls concurrency; user_count controls which credentials are used.
   # Example: user_count=10 + --users 10  → 10 unique users, each gets a unique credential
   #          user_count=10 + --users 20  → 10 credentials recycled round-robin at 20 concurrency
-  user_count: 2
+  user_count: 1
 
   # Default spawn rate (users/second). Override via locust --spawn-rate N
   spawn_rate: 1
