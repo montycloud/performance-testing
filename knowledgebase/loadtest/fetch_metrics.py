@@ -150,10 +150,15 @@ def fetch_payload(client, env, start_dt, end_dt, args):
     return rows_to_payload(results)
 
 
-def poll_until_complete(client, args, target_ids):
+def poll_until_complete(client, args, target_ids, start_dt=None):
     """Re-run the query every --poll-every seconds until every target id's row has
-    kb_ingestion_completed, or --timeout elapses. Returns (payload, rows)"""
-    poll_start_dt = datetime.now(timezone.utc)
+    kb_ingestion_completed, or --timeout elapses. Returns (payload, rows)
+
+    start_dt: query window start; defaults to "now" if not given (e.g. standalone
+    poll mode). Pipeline callers should pass the upload phase's start time so
+    early lifecycle events (upload/metadata/summarization) aren't missed.
+    """
+    poll_start_dt = start_dt or datetime.now(timezone.utc)
     deadline = time.monotonic() + args.timeout
     poll_count = 0
     payload, rows = [], []

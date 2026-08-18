@@ -123,7 +123,7 @@ def run_stage2(args, client, collections):
     return succeeded
 
 
-def run_stage3(args, env, document_ids):
+def run_stage3(args, env, document_ids, upload_start_dt):
     if not document_ids:
         sys.exit("[Stage 3] No successfully uploaded documents to track — skipping.")
     args.env = env
@@ -132,7 +132,9 @@ def run_stage3(args, env, document_ids):
 
     print(f"[Stage 3] Polling CloudWatch for {len(document_ids)} document(s) "
           f"every {args.poll_every}s (timeout {args.timeout}s) ...")
-    payload, rows = poll_until_complete(logs_client, args, document_ids)
+    # Query window starts at Stage 2's upload start so upload/metadata/summarization
+    # events (which happen before Stage 3 begins) aren't excluded.
+    payload, rows = poll_until_complete(logs_client, args, document_ids, start_dt=upload_start_dt)
 
     raw_path = save_raw_export(payload, args.output_dir, env)
     print(f"[Stage 3] Saved raw export ({len(payload)} log lines) to {raw_path}")
@@ -147,8 +149,9 @@ def run_stage3(args, env, document_ids):
 def main():
     args = parse_args()
     env, client, collections = run_stage1(args)
+    upload_start_dt = datetime.datetime.now(datetime.timezone.utc)
     document_ids = run_stage2(args, client, collections)
-    run_stage3(args, env, document_ids)
+    run_stage3(args, env, document_ids, upload_start_dt)
 
 
 if __name__ == "__main__":
