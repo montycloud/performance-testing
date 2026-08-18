@@ -17,3 +17,6 @@ collections:
   - name: PT-Collection-3
     description: Performance test collection 1
     category: tenant
+  # name: RANDOM auto-generates a "PT-Collection-<timestamp>" name + description; category stays as set below
+  # - name: RANDOM
+  #   category: tenant

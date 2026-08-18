@@ -33,6 +33,10 @@ with each collection's `id` — pass those ids as `--collection-id` to `main.py`
 (comma-separated for multiple collections); `main.py` reuses the same
 `collections_config.yaml` to sign in.
 
+Set a collection's `name: RANDOM` to auto-generate a unique
+`PT-Collection-<timestamp>` name and description instead of a literal name;
+`category` is still taken from the config as usual.
+
 ## Run
 
 ```bash

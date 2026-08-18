@@ -63,10 +63,12 @@ def build_rows(payload):
 
         document = by_document[document_id]
         document["document_id"] = document_id
-        document["organization_id"] = data.get("OrganizationId", "")
-        document["collection_id"] = data.get("collection_id", "")
-        document["document_type"] = data.get("document_type", "")
-        document["document_size"] = str(data.get("document_size", ""))
+        # Some actions (e.g. document_uploaded) log these as explicit null;
+        # keep the first non-null value seen instead of overwriting with "".
+        document["organization_id"] = data.get("OrganizationId") or document.get("organization_id", "")
+        document["collection_id"] = data.get("collection_id") or document.get("collection_id", "")
+        document["document_type"] = data.get("document_type") or document.get("document_type", "")
+        document["document_size"] = str(data.get("document_size") or document.get("document_size", ""))
         document[action] = timestamp
 
     return [build_result(by_document[document_id]) for document_id in sorted(by_document)]
@@ -101,6 +103,10 @@ def build_result(document):
         ),
         "kb_ingestion_time_s": format_duration(
             kb_ingestion_started, kb_ingestion_completed
+        ),
+        # Time from requesting the upload to the document being queryable end-to-end.
+        "perceived_user_time_s": format_duration(
+            upload_url_generated, kb_ingestion_completed
         ),
     }
 
@@ -138,6 +144,7 @@ def main():
         "metadata_creation_time_s",
         "summarization_time_s",
         "kb_ingestion_time_s",
+        "perceived_user_time_s",
     ]
 
     if args.format == "markdown":

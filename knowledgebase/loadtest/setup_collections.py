@@ -42,26 +42,35 @@ def load_config(path):
     return cfg
 
 
+def generate_random_name(prefix="PT-Collection"):
+    return f"{prefix}-{datetime.datetime.now():%Y%m%d_%H%M%S}"
+
+
 def create_collections(client, specs):
     results = []
     for spec in specs:
+        name = spec["name"]
+        description = spec.get("description", "")
+        if name.strip().upper() == "RANDOM":
+            name = generate_random_name()
+            description = f"Auto-generated collection created on {name.split('-', 2)[-1]}"
         body = {
-            "name": spec["name"],
-            "description": spec.get("description", ""),
+            "name": name,
+            "description": description,
             "category": spec.get("category", "tenant"),
         }
         resp = client.create_collection(body)
         if resp.status_code not in (200, 201):
-            print(f"  FAILED '{spec['name']}' (HTTP {resp.status_code}): {resp.text[:300]}")
+            print(f"  FAILED '{name}' (HTTP {resp.status_code}): {resp.text[:300]}")
             continue
         data = (resp.json() or {}).get("data") or {}
         results.append({
-            "name": data.get("name", spec["name"]),
+            "name": data.get("name", name),
             "id": data.get("id"),
             "customer_id": data.get("customer_id"),
             "organization_id": data.get("organization_id"),
         })
-        print(f"  created '{spec['name']}' -> {data.get('id')}")
+        print(f"  created '{name}' -> {data.get('id')}")
     return results
 
 

@@ -47,6 +47,7 @@ HEADERS = [
     "metadata_creation_time_s",
     "summarization_time_s",
     "kb_ingestion_time_s",
+    "perceived_user_time_s",
 ]
 
 
