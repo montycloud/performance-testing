@@ -1,17 +1,37 @@
 # KB Upload Load Test
 
 Generates concurrent load against the Tenant KB document-upload flow
-(`POST .../documents/upload_url` → `PUT` to the presigned S3 URL). Load
-generation only — metrics/analysis are handled separately via log filters.
+(`POST .../documents/upload_url` → `PUT` to the presigned S3 URL). Metrics are
+fetched afterwards from CloudWatch Logs Insights (see "CloudWatch metrics" below).
 
 ## Setup
 
 ```bash
 pip install -r requirements.txt
-export KB_LOADTEST_TOKEN=<jwt>        # pre-obtained auth token
+export KB_ROOT_PASSWORD=<msp root password>   # signs in via collections_config.yaml
 ```
 
+`main.py` signs in itself using the root email/env in `collections_config.yaml`
+(same file as Stage 1). Pass `--token`/`KB_LOADTEST_TOKEN` instead to skip
+sign-in and use a pre-obtained JWT.
+
 The corpus lives in `./corpus`.
+
+## Collection setup (Stage 1)
+
+Create the collection(s) to upload into, without a manual curl/browser step:
+
+```bash
+export KB_ROOT_PASSWORD=<msp root password>
+python setup_collections.py --config collections_config.yaml
+```
+
+Edit `collections_config.yaml` first (env, root email, backend-required cookies,
+and the list of collections to create). The script signs in as the MSP root
+user, creates each collection, and writes `collections_output_<timestamp>.yaml`
+with each collection's `id` — pass those ids as `--collection-id` to `main.py`
+(comma-separated for multiple collections); `main.py` reuses the same
+`collections_config.yaml` to sign in.
 
 ## Run
 
@@ -45,6 +65,62 @@ python main.py --env dev1 --collection-id <cid> \
 ```
 
 Deletion is asynchronous (docs go to `deleting`, then are purged downstream).
+
+## CloudWatch metrics (Stage 3)
+
+After a load-test run, fetch document-lifecycle timings straight from
+CloudWatch Logs Insights — no manual console export needed:
+
+```bash
+python fetch_metrics.py --env stg1 --minutes-back 60 --format markdown
+```
+
+- `--env` picks which env's log groups to query (dev1, stg1, prd01, ...).
+- `--minutes-back` sets the query window (from now minus N minutes to now).
+- `--aws-profile` / `--aws-region` (default `us-east-2`) control the boto3
+  session; credentials otherwise come from the default AWS credential chain.
+- The raw Logs Insights export is always saved to
+  `logs/cloudwatch_<env>_<timestamp>.json` for later re-analysis, in addition
+  to printing the rendered table.
+- Prints the same table as `analyze_kb_timings.py`
+  (`s3_upload_time_s`, `metadata_creation_time_s`, `summarization_time_s`,
+  `kb_ingestion_time_s` per document). You can also run
+  `analyze_kb_timings.py` directly against any saved export file.
+
+### Poll until a specific set of documents finish ingesting
+
+Instead of a fixed time window, track specific document ids until they all
+reach `kb_ingestion_completed` (or a timeout):
+
+```bash
+python fetch_metrics.py --env stg1 --document-ids <doc_id1,doc_id2> \
+  --poll-every 30 --timeout 600
+```
+
+- Re-runs the CloudWatch query every `--poll-every` seconds, printing progress
+  (e.g. "2/3 completed — waiting on: <id>") each cycle.
+- Waits for **all** given ids to complete, or reports the ones still pending
+  once `--timeout` (default 600s / 10 min) elapses.
+- Saves the raw export once at the end, then renders the final table filtered
+  to just those document ids.
+
+## Full pipeline (Stage 1 → 2 → 3 in one command)
+
+`run_pipeline.py` chains all three stages for CI/pipeline use — creates
+collections, uploads documents, then polls CloudWatch until every uploaded
+document finishes ingesting:
+
+```bash
+export KB_ROOT_PASSWORD=<msp root password>
+python run_pipeline.py --config collections_config.yaml \
+  --concurrency 10 --batches 5 --file-type random \
+  --poll-every 30 --timeout 600
+```
+
+Each stage's standalone script (`setup_collections.py`, `main.py`,
+`fetch_metrics.py`) still works exactly as documented above — use them
+individually when you don't need the full chain (e.g. to re-run just Stage 3
+against an existing upload).
 
 ## Notes
 

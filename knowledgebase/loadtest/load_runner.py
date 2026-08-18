@@ -10,6 +10,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from logger import JsonlLogger, print_tally
 
+# Corpus files with any other extension (e.g. .DS_Store) are ignored.
+ALLOWED_EXTENSIONS = {"txt", "md", "html", "doc", "docx", "csv", "xls", "xlsx", "pdf"}
+
 
 def utcnow_iso():
     """Current UTC time as an ISO-8601 string (used to stamp each record)."""
@@ -39,6 +42,8 @@ def load_corpus(corpus_dir, file_type):
         if not os.path.isfile(path) or "." not in name:
             continue
         ext = name.rsplit(".", 1)[1].lower()
+        if ext not in ALLOWED_EXTENSIONS:
+            continue
         if file_type != "random" and ext != file_type.lower():
             continue
         files.append((ext, os.path.getsize(path), path))
@@ -172,3 +177,4 @@ def run_load(args, client):
         logger.close()
     print_tally(results, time.monotonic() - start, args.run_id, label_name,
                 args.log_file)
+    return results
