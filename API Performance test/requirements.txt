@@ -1,0 +1,8 @@
+# Core performance testing framework
+locust>=2.20.0
+
+# Config parsing
+PyYAML>=6.0
+
+# Load .env files (optional; used for future secret injection)
+python-dotenv>=1.0.0

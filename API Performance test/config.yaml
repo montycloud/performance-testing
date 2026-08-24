@@ -1,0 +1,92 @@
+api:
+  # Base URL of the MontyCloud API (no trailing slash)
+  base_url: "https://stg1-api.montycloud.com"
+  # Pass MC_DEBUG_MODE=true in every signin payload (bypasses CAPTCHA checks)
+  mc_debug_mode: true
+  # Per-request timeout in seconds
+  timeout_seconds: 40
+
+test:
+  # Path to the users CSV file (relative to this config file, or absolute)
+  # CSV must have columns: Name, Email, Password, New Password
+  # The test signs in with Email + "New Password" (permanent password post-reset)
+  users_csv: "./users.csv"
+
+  # How many users to load from the CSV (first N rows).
+  # Locust --users controls concurrency; user_count controls which credentials are used.
+  # Example: user_count=10 + --users 10  → 10 unique users, each gets a unique credential
+  #          user_count=10 + --users 20  → 10 credentials recycled round-robin at 20 concurrency
+  user_count: 50
+
+  # Default spawn rate (users/second). Override via locust --spawn-rate N
+  spawn_rate: 50
+
+  # Default run time. Override via locust --run-time <value>
+  run_time: "5m"
+
+  # Run mode controls how long virtual users stay active:
+  #
+  #   single_journey  – each user completes `iterations` full journeys
+  #                     (Home Page + WAFR) then stops. No new user is spawned
+  #                     in its place. Test exits automatically when all users
+  #                     have finished. Use this with --users N (no --run-time
+  #                     needed).
+  #
+  #   timed           – users loop continuously until --run-time expires.
+  #                     Use this with --users N --run-time <duration>.
+  #                     `iterations` is ignored in this mode.
+  #
+  run_mode: "single_journey"
+
+  # Human-readable description of this test run (appears at the top of the HTML report).
+  # Describe the scenario: e.g. number of users, iterations, what is being measured.
+  description: |
+    Test: Post Fixation and deployment to Stage 3Aug
+    Health Events Standalone Flow
+    Number of Users - 50
+    Mode : Iteration Mode ( 50 Users Doing 20 Iterations Single Signin) 
+    Email: perftestuser1@montycloud.com - perftestuser50@montycloud.com
+    Tenant: User has access to 1 Tenant which has 2 AWS accounts,
+    Total Resources: 741
+    AWS Accounts: 398370181389 and 016257615686
+    Total Findings: 5.49K
+    
+  # Name used in the custom report filename: custom_<report_name>_<timestamp>.html
+  # Use snake_case or hyphens; avoid spaces. Leave blank to use default "report".
+
+  report_name: "report_Health_events_users_50_run_20_iterations__3Aug"
+  # Number of full journeys each user completes in single_journey mode
+  # before stopping. Example: --users 1 + iterations: 20 → one user runs
+  # the journey 20 times back-to-back. Ignored in timed mode.
+  iterations: 20
+
+  # Think time (seconds) between the Home Page and WAFR Page flows.
+  # Each iteration sleeps a random duration in [think_time_min, think_time_max].
+  # Set both to 0 to disable think time entirely.
+  think_time_min: 2
+  think_time_max: 5
+
+  # Think time (seconds) between batches *within* the WAFR page.
+  # Typically shorter than the page-transition think time.
+  # Defaults to think_time_min / think_time_max if not set.
+  wafr_think_time_min: 1
+  wafr_think_time_max: 3
+
+# Health Events flow (added after Home Page/WAFR in the journey, or run
+# standalone). Uses the same `think_time_min`/`think_time_max` above for
+# the pause before Health calls start.
+health:
+  # false (default) = Health Events calls never run; behaviour is identical
+  # to before this feature was added.
+  enabled: true
+
+  # mode controls how the Health Events flow fits into the user journey:
+  #
+  #   appended    – Signin -> Home Page -> WAFR -> think time -> Health.
+  #                 The existing full journey, with Health tacked on at the end.
+  #
+  #   standalone  – Signin -> think time -> Health only.
+  #                 Skips Home Page and WAFR entirely for this run.
+  #
+  mode: "standalone"
+
