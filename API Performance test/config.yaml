@@ -54,7 +54,7 @@ test:
   # Name used in the custom report filename: custom_<report_name>_<timestamp>.html
   # Use snake_case or hyphens; avoid spaces. Leave blank to use default "report".
 
-  report_name: "report_Health_events_users_50_run_20_terations__3Aug"
+  report_name: "report_Health_events_users_50_run_20_iterations__3Aug"
   # Number of full journeys each user completes in single_journey mode
   # before stopping. Example: --users 1 + iterations: 20 → one user runs
   # the journey 20 times back-to-back. Ignored in timed mode.
