@@ -22,14 +22,24 @@ def base_url_for_env(env):
     return f"https://{host}/knowledgebase/api"
 
 
+def auth_base_url_for_env(env):
+    """Root API host for /auth/signin (no /knowledgebase/api suffix)."""
+    host = ENVIRONMENTS.get(env)
+    if not host:
+        sys.exit(f"Unknown --env '{env}'. Known: {', '.join(ENVIRONMENTS)}. "
+                 f"Or pass --base-url to override.")
+    return f"https://{host}"
+
+
 class KBClient:
     """Thin wrapper over the KB REST API. One session per thread."""
 
-    def __init__(self, base_url, token, org_id, timeout):
+    def __init__(self, base_url, token, org_id, timeout, cookies=None):
         self.base_url = base_url.rstrip("/")
         self.token = token
         self.org_id = org_id
         self.timeout = timeout
+        self.cookies = cookies or {}
         self._local = threading.local()
 
     @property
@@ -41,8 +51,15 @@ class KBClient:
             s.headers.update({"Authorization": self.token})
             if self.org_id:  # d2oid cookie overrides the token user's org
                 s.cookies.set("d2oid", self.org_id)
+            # Disabled for now: not needed for collection creation.
+            # for name, value in self.cookies.items():
+            #     s.cookies.set(name, value)
             self._local.session = s
         return s
+
+    def create_collection(self, body):
+        return self.session.post(f"{self.base_url}/collections/",
+                                 json=body, timeout=self.timeout)
 
     def list_labels(self, page=1, page_size=100, search=None):
         params = {"page": page, "page_size": page_size}
