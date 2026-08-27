@@ -1,0 +1,68 @@
+# Chat query sweep manifest — consumed by run_chat_executions.py
+#
+# Runs the same Locust chat test multiple times back-to-back with a different
+# chat_queries file (and optionally a different description) each time, while
+# keeping users/concurrency identical across every run. config.yaml itself is
+# never permanently changed — run_chat_executions.py overwrites it per-run and
+# restores the original content once the whole sweep finishes.
+#
+# Paths under `queries_file` are resolved the same way config.yaml's
+# `chat.queries_file` normally is: relative to this "API Performance test/"
+# directory (or absolute).
+
+# Shared across every execution in this sweep ("users remain the same").
+# NOTE: users.csv must have at least `users` rows of distinct credentials —
+# config.yaml's test.user_count must also be >= this value (see README's
+# "user_count vs --users" table) so each concurrent user gets a unique login.
+run:
+  users: 1
+  spawn_rate: 1
+  run_time: ""   # blank = rely on single_journey mode's auto-stop (see config.yaml)
+
+executions:
+  # Runnable out of the box — reuses the existing sample queries file twice
+  # under different names so you can dry-run/verify the sweep mechanics.
+  - name: report_AI_Chat_User_2_Tenants_3_High_Query_inventory_1
+    queries_file: "./chat_queries/chat_queries_inventory_1.txt"
+    description: |
+      AI Chat, 
+      Parallel User: 1
+      Tenants 3  ( MSP ,Tenant 1 and Tenant 2 )
+      Extract findings data for the selected Tenant(s) and perform analysis according to the rules
+
+  - name: report_AI_Chat_User_2_Tenants_3_Medium_Query_inventory_2
+    queries_file: "./chat_queries/chat_queries_inventory_2.txt"
+    description: |
+      AI Chat, 
+      Parallel User: 1
+      Tenants 3  ( MSP ,Tenant 1 and Tenant 2 )
+      <HTML Report> Extract findings data for the selected Tenant(s) and perform analysis according to the rules
+
+  - name: report_AI_Chat_User_2_Tenants_3_Medium_Query_inventory_3
+    queries_file: "./chat_queries/chat_queries_inventory_3.txt"
+    description: |
+      AI Chat, 
+      Parallel User: 1
+      Tenants 3  ( MSP ,Tenant 1 and Tenant 2 )
+      Extract findings per selected tenant (no aggregation). Output starts with: Title - #Tenant Resource Inventory Summary For each tenant:
+      
+  - name: report_AI_Chat_User_2_Tenants_3_Medium_Query_inventory_4
+    queries_file: "./chat_queries/chat_queries_inventory_4.txt"
+    description: |
+      AI Chat, 
+      Parallel User: 2
+      Tenants 3  ( MSP ,Tenant 1 and Tenant 2 )
+      Extract findings per selected tenant (no aggregation)
+      Extract findings per selected tenant (no aggregation). Output starts with:Title - #Tenant Resource Inventory Snapshot – AWS Accounts, Regions,
+
+  # Template for a real multi-type sweep — copy one file per query "type",
+  # point queries_file at it, give each entry a distinct name, then uncomment.
+  # - name: net_cost_2_months
+  #   queries_file: "./chat_queries_net_cost.txt"
+  #   description: |
+  #     AI Conversation Chat — Tenant Net Cost Report query set
+  #
+  # - name: security_pillar
+  #   queries_file: "./chat_queries_security_pillar.txt"
+  #   description: |
+  #     AI Conversation Chat — Security Pillar WAFR query set

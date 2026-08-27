@@ -26,19 +26,23 @@ import csv
 import json
 import logging
 import random
+import re
 import sys
 import threading
+import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import gevent
 import gevent.pool
+import websocket
 import yaml
 from requests.adapters import HTTPAdapter
 from dotenv import load_dotenv
 from locust import HttpUser, constant, events, task
 from locust.exception import StopUser
 from locust.runners import STATE_CLEANUP, STATE_STOPPED, STATE_STOPPING, WorkerRunner
+from locust.stats import CSV_STATS_FLUSH_INTERVAL_SEC, CSV_STATS_INTERVAL_SEC
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -105,6 +109,60 @@ _health_cfg: Dict[str, Any] = CFG.get("health", {}) or {}
 _HEALTH_ENABLED: bool = bool(_health_cfg.get("enabled", False))
 _HEALTH_MODE: str = str(_health_cfg.get("mode", "appended")).strip().lower()
 
+# Chat flow (config section: `chat`). WebSocket-based AI chat bot journey.
+#   enabled  - whether the Chat call runs at all. False preserves today's
+#              behaviour exactly (no WebSocket activity).
+#   mode     - "appended"  : Signin -> Home Page -> WAFR -> (Health) -> think time -> Chat
+#              "standalone": Signin -> think time -> Chat (skips Home/WAFR/Health)
+#
+# NOTE: each chat call opens ONE WebSocket connection and sends ONE query,
+# then closes. Multi-turn conversations on a single connection are deferred
+# — see WEBSOCKET_CHAT_APPROACH.md.
+_chat_cfg: Dict[str, Any] = CFG.get("chat", {}) or {}
+_CHAT_ENABLED: bool = bool(_chat_cfg.get("enabled", False))
+_CHAT_MODE: str = str(_chat_cfg.get("mode", "appended")).strip().lower()
+WS_BASE_URL: str = str(_chat_cfg.get("ws_base_url", "")).rstrip("/")
+_CHAT_TIMEOUT: float = float(_chat_cfg.get("timeout_seconds", 120))
+_CHAT_MODEL_ID: str = str(_chat_cfg.get("model_id", ""))
+_CHAT_TEMPERATURE: float = float(_chat_cfg.get("temperature", 0.1))
+_CHAT_TOP_P: float = float(_chat_cfg.get("top_p", 1))
+_CHAT_TOP_K: int = int(_chat_cfg.get("top_k", 250))
+# Max number of "yes Continue" retries per chat call when SESSION_TIME_LIMIT_REACHED.
+_CHAT_MAX_SESSION_RETRIES: int = int(_chat_cfg.get("max_session_retries", 5))
+
+if _CHAT_ENABLED and _HEALTH_ENABLED and _CHAT_MODE == "standalone" and _HEALTH_MODE == "standalone":
+    logger.warning(
+        "Both 'health.mode' and 'chat.mode' are 'standalone' — chat takes "
+        "precedence; the Health Events flow will not run this test."
+    )
+
+# Optional per-message chat transcript log (config: chat.transcript_log).
+# Blank/unset = disabled (no separate file; only the summary lines already
+# logged via `logger` show up, subject to Locust's own --logfile/--loglevel).
+_CHAT_TRANSCRIPT_RAW: str = str(_chat_cfg.get("transcript_log", "")).strip()
+_CHAT_TRANSCRIPT_PATH: Optional[Path] = None
+if _CHAT_ENABLED and _CHAT_TRANSCRIPT_RAW:
+    _CHAT_TRANSCRIPT_PATH = Path(_CHAT_TRANSCRIPT_RAW)
+    if not _CHAT_TRANSCRIPT_PATH.is_absolute():
+        _CHAT_TRANSCRIPT_PATH = (_HERE / _CHAT_TRANSCRIPT_PATH).resolve()
+    _CHAT_TRANSCRIPT_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+_chat_transcript_logger: Optional[logging.Logger] = None
+if _CHAT_TRANSCRIPT_PATH is not None:
+    _chat_transcript_logger = logging.getLogger("perf_test.chat_transcript")
+    _chat_transcript_logger.setLevel(logging.INFO)
+    _chat_transcript_logger.propagate = False
+    if not _chat_transcript_logger.handlers:
+        _transcript_handler = logging.FileHandler(_CHAT_TRANSCRIPT_PATH, mode="a", encoding="utf-8")
+        _transcript_handler.setFormatter(logging.Formatter("%(asctime)s | %(message)s"))
+        _chat_transcript_logger.addHandler(_transcript_handler)
+    logger.info("Chat transcript logging enabled -> %s", _CHAT_TRANSCRIPT_PATH)
+
+
+def _redact_ws_url(url: str) -> str:
+    """Strip the JWT out of a WS URL before it ever reaches a log line."""
+    return re.sub(r"(Authorization=)[^&]+", r"\1<redacted>", url)
+
 
 def _load_users(csv_path: Path, limit: int) -> List[Dict[str, str]]:
     """Load up to *limit* rows from the users CSV."""
@@ -126,6 +184,63 @@ def _load_users(csv_path: Path, limit: int) -> List[Dict[str, str]]:
 
 
 USERS: List[Dict[str, str]] = _load_users(_users_csv_path, USER_COUNT)
+
+
+def _load_queries(path: Path) -> List[str]:
+    """Load non-empty, non-comment lines from the chat queries file."""
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Chat queries file not found: {path}\n"
+            f"  Update 'chat.queries_file' in config.yaml."
+        )
+    with open(path, "r", encoding="utf-8") as fh:
+        lines = [line.strip() for line in fh]
+    queries = [line for line in lines if line and not line.startswith("#")]
+    if not queries:
+        raise ValueError(f"Chat queries file is empty: {path}")
+    logger.info("Loaded %d chat quer(y/ies) from %s", len(queries), path)
+    return queries
+
+
+def _load_tenants(path: Path) -> Dict[str, Dict[str, Any]]:
+    """Load Tenant.json into a dict keyed by exact tenant `Name`."""
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Tenants file not found: {path}\n"
+            f"  Update 'chat.tenants_file' in config.yaml."
+        )
+    with open(path, "r", encoding="utf-8") as fh:
+        entries = json.load(fh)
+    if not isinstance(entries, list):
+        raise ValueError(f"Tenants file must be a JSON list: {path}")
+    tenants = {e["Name"]: e for e in entries if isinstance(e, dict) and e.get("Name")}
+    logger.info("Loaded %d tenant(s) from %s", len(tenants), path)
+    return tenants
+
+
+# Only load the queries/tenants files when the Chat flow is actually enabled,
+# so existing setups without chat_queries.txt/Tenant.json configured keep
+# working unchanged.
+QUERIES: List[str] = []
+TENANTS: Dict[str, Dict[str, Any]] = {}
+# Every chat call sends all Tenant.json tenants, so this is built once here
+# rather than per-user/per-call.
+ALL_TENANT_SCOPE: List[Dict[str, str]] = []
+if _CHAT_ENABLED:
+    _queries_raw: str = str(_chat_cfg.get("queries_file", "./chat_queries.txt"))
+    _queries_path = Path(_queries_raw)
+    if not _queries_path.is_absolute():
+        _queries_path = (_HERE / _queries_path).resolve()
+    QUERIES = _load_queries(_queries_path)
+
+    _tenants_raw: str = str(_chat_cfg.get("tenants_file", "./Tenant.json"))
+    _tenants_path = Path(_tenants_raw)
+    if not _tenants_path.is_absolute():
+        _tenants_path = (_HERE / _tenants_path).resolve()
+    TENANTS = _load_tenants(_tenants_path)
+    ALL_TENANT_SCOPE = [
+        {entry["ID"]: entry["Name"]} for entry in TENANTS.values() if entry.get("ID")
+    ]
 
 # ---------------------------------------------------------------------------
 # Thread-safe round-robin user assignment
@@ -151,6 +266,24 @@ def _claim_user() -> Dict[str, str]:
 # requested to execute.
 _completed_journeys = 0
 _completed_journeys_lock = threading.Lock()
+
+# ---------------------------------------------------------------------------
+# Session-timeout continuation tracking (thread-safe)
+# ---------------------------------------------------------------------------
+# Per-user count of how many times the chat was continued after receiving
+# SESSION_TIME_LIMIT_REACHED.  Keyed by user email; populated at the end of
+# each user's chat call so the test_stop hook can write it to a sidecar file
+# and the report generator can render it.
+_session_timeout_stats: Dict[str, int] = {}
+_session_timeout_stats_lock = threading.Lock()
+
+
+def _record_user_session_timeouts(email: str, count: int) -> None:
+    """Accumulate *count* session-timeout continuations for *email*."""
+    if count == 0:
+        return
+    with _session_timeout_stats_lock:
+        _session_timeout_stats[email] = _session_timeout_stats.get(email, 0) + count
 
 
 # ---------------------------------------------------------------------------
@@ -181,6 +314,7 @@ class MontyCloudUser(HttpUser):
         self._token: Optional[str] = None
         self._org_id: str = ""
         self._iterations_done: int = 0
+        self._session_timeout_continuations: int = 0
         # Enlarge the connection pool so the largest parallel batch (28 calls
         # in WAFR Batch 2) never discards connections.  pool_connections=1
         # because we talk to a single host; pool_maxsize=50 gives headroom.
@@ -320,7 +454,7 @@ class MontyCloudUser(HttpUser):
 
     @task
     def full_journey(self) -> None:
-        """Complete user journey: Home Page → WAFR Page → (optional) Health Events.
+        """Complete user journey: Home Page → WAFR Page → (optional) Health Events → (optional) Chat.
 
         Behaviour is controlled by ``run_mode`` in config.yaml:
 
@@ -340,6 +474,15 @@ class MontyCloudUser(HttpUser):
                                       behaviour).
           enabled=True, mode=appended    Home Page -> WAFR -> think time -> Health.
           enabled=True, mode=standalone  Skips Home Page/WAFR: think time -> Health.
+
+        The Chat flow (WebSocket) is controlled by ``chat`` in config.yaml:
+
+          enabled=False              No chat activity (default; unchanged behaviour).
+          enabled=True, mode=appended    ...WAFR/(Health) -> think time -> Chat.
+          enabled=True, mode=standalone  Skips Home Page/WAFR/Health: think time -> Chat.
+
+        If both ``health.mode`` and ``chat.mode`` are "standalone", chat takes
+        precedence (a startup warning is logged for this combination).
         """
         if not self._token:
             # Re-attempt signin if on_start failed
@@ -351,7 +494,11 @@ class MontyCloudUser(HttpUser):
                 )
                 raise StopUser()  # broken user — stop regardless of run_mode
 
-        if _HEALTH_ENABLED and _HEALTH_MODE == "standalone":
+        if _CHAT_ENABLED and _CHAT_MODE == "standalone":
+            # Signin -> think time -> Chat only (Home Page/WAFR/Health skipped).
+            gevent.sleep(random.uniform(_THINK_MIN, _THINK_MAX))
+            self._chat_flow()
+        elif _HEALTH_ENABLED and _HEALTH_MODE == "standalone":
             # Signin -> think time -> Health only (Home Page/WAFR skipped).
             gevent.sleep(random.uniform(_THINK_MIN, _THINK_MAX))
             self._health_flow()
@@ -364,6 +511,10 @@ class MontyCloudUser(HttpUser):
                 # Appended mode: another think time before drilling into Health.
                 gevent.sleep(random.uniform(_THINK_MIN, _THINK_MAX))
                 self._health_flow()
+            if _CHAT_ENABLED:
+                # Appended mode: another think time before starting the Chat call.
+                gevent.sleep(random.uniform(_THINK_MIN, _THINK_MAX))
+                self._chat_flow()
 
         if _RUN_MODE == "single_journey":
             self._iterations_done += 1
@@ -804,6 +955,340 @@ class MontyCloudUser(HttpUser):
             ),
         ])
 
+    # ------------------------------------------------------------------
+    # Chat flow (WebSocket)
+    # ------------------------------------------------------------------
+    #
+    # Opens a single WebSocket connection, sends ONE query, and streams
+    # frames until PROMPT_STATUS/ENDED (or the overall timeout elapses).
+    # Multi-turn conversations on one connection are deferred — see
+    # WEBSOCKET_CHAT_APPROACH.md.
+    #
+    # OrganizationId (WS URL query param) stays as self._org_id, the signed-in
+    # user's own org fetched via /auth/user during sign-in — same as Home
+    # Page/WAFR/Health. The `tenant_scope` in the message body is different:
+    # it always lists every tenant from Tenant.json (config: chat.tenants_file),
+    # regardless of which user is running — the chat bot's tenant scoping uses
+    # tenant-specific org ids, not the user's own root org.
+
+    def _fire_chat_metric(
+        self,
+        name: str,
+        start_time: float,
+        exception: Optional[BaseException] = None,
+    ) -> None:
+        """Record a pseudo-request into Locust's stats (custom-client pattern)."""
+        elapsed_ms = (time.monotonic() - start_time) * 1000
+        self.environment.events.request.fire(
+            request_type="WS",
+            name=name,
+            response_time=elapsed_ms,
+            response_length=0,
+            exception=exception,
+            context={},
+        )
+
+    def _log_chat_message(
+        self,
+        direction: str,
+        category: str,
+        elapsed_s: float,
+        detail: str,
+        max_len: int = 500,
+    ) -> None:
+        """Append one line to chat.transcript_log (no-op if not configured)."""
+        if _chat_transcript_logger is None:
+            return
+        email = self._creds.get("Email", "unknown")
+        if len(detail) > max_len:
+            detail = f"{detail[:max_len]}...(+{len(detail) - max_len} more chars)"
+        _chat_transcript_logger.info(
+            "%-28s | %-4s | %-11s | +%8.3fs | %s",
+            email, direction, category, elapsed_s, detail,
+        )
+
+    def _run_chat_ws(
+        self,
+        url: str,
+        query: str,
+        thread_id: str,
+        email: str,
+        attempt: int,
+    ) -> Tuple[bool, Optional[BaseException], Optional[str]]:
+        """Open a WebSocket, send *query*, and read frames until ENDED or error.
+
+        Returns a 3-tuple:
+            ended (bool)
+                True when PROMPT_STATUS/ENDED was received cleanly.
+            exception (Optional[BaseException])
+                Set on any non-session-timeout failure; None on success or when
+                a session timeout signals a retry.
+            session_timeout_thread_id (Optional[str])
+                Non-None only when PROMPT_STATUS/REJECTED with code
+                SESSION_TIME_LIMIT_REACHED is received.  The value is the
+                ``thread_id`` from that rejection frame, to be used in the
+                follow-up "yes Continue" call.
+        """
+        connect_start = time.monotonic()
+        try:
+            ws = websocket.create_connection(url, timeout=_CHAT_TIMEOUT)
+        except Exception as exc:
+            logger.error("[%s] Chat WebSocket connect failed (attempt %d): %s", email, attempt, exc)
+            self._log_chat_message(
+                "SYS", "CONNECT_FAIL", time.monotonic() - connect_start,
+                f"attempt={attempt} url={_redact_ws_url(url)} error={exc}",
+            )
+            return False, exc, None
+
+        self._log_chat_message(
+            "SYS", "CONNECTED", time.monotonic() - connect_start,
+            f"attempt={attempt} url={_redact_ws_url(url)}",
+        )
+
+        payload = {
+            "query": query,
+            "thread_id": thread_id,
+            "metadata": {
+                "model_id": _CHAT_MODEL_ID,
+                "temperature": _CHAT_TEMPERATURE,
+                "top_p": _CHAT_TOP_P,
+                "top_k": _CHAT_TOP_K,
+            },
+            "tenant_scope": ALL_TENANT_SCOPE,
+        }
+
+        t_send = time.monotonic()
+        ttft_recorded = False
+        ended = False
+        chat_exc: Optional[BaseException] = None
+        session_timeout_thread_id: Optional[str] = None
+
+        try:
+            ws.send(json.dumps(payload))
+            self._log_chat_message("SEND", "QUERY", 0.0, f"attempt={attempt} query={query}")
+            deadline = t_send + _CHAT_TIMEOUT
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    chat_exc = TimeoutError(
+                        f"No PROMPT_STATUS/ENDED frame within {_CHAT_TIMEOUT}s"
+                    )
+                    logger.error("[%s] Chat timed out waiting for ENDED frame (attempt %d).", email, attempt)
+                    self._log_chat_message(
+                        "RECV", "TIMEOUT", time.monotonic() - t_send,
+                        f"attempt={attempt} No ENDED frame within {_CHAT_TIMEOUT}s",
+                    )
+                    break
+
+                ws.settimeout(remaining)
+                try:
+                    raw = ws.recv()
+                except websocket.WebSocketTimeoutException:
+                    chat_exc = TimeoutError(
+                        f"No PROMPT_STATUS/ENDED frame within {_CHAT_TIMEOUT}s"
+                    )
+                    logger.error("[%s] Chat timed out waiting for ENDED frame (attempt %d).", email, attempt)
+                    self._log_chat_message(
+                        "RECV", "TIMEOUT", time.monotonic() - t_send,
+                        f"attempt={attempt} No ENDED frame within {_CHAT_TIMEOUT}s",
+                    )
+                    break
+
+                if not raw:
+                    continue
+
+                frame_elapsed = time.monotonic() - t_send
+
+                try:
+                    frame = json.loads(raw)
+                except (ValueError, TypeError):
+                    logger.warning("[%s] Chat: non-JSON frame received; ignoring.", email)
+                    self._log_chat_message("RECV", "NON_JSON", frame_elapsed, str(raw))
+                    continue
+
+                # Informational AWS API Gateway notice — keep listening, don't fail.
+                if frame.get("message") == "Endpoint request timed out":
+                    logger.warning(
+                        "[%s] Chat received 'Endpoint request timed out' notice; "
+                        "continuing to listen for further frames.",
+                        email,
+                    )
+                    self._log_chat_message("RECV", "GW_TIMEOUT", frame_elapsed, raw)
+                    continue
+
+                if frame.get("type") == "THREAD_TITLE":
+                    logger.info("[%s] Chat thread started: %s", email, frame.get("thread_title"))
+                    self._log_chat_message("RECV", "THREAD_TITLE", frame_elapsed, raw)
+                    continue
+
+                # Top-level PROMPT_STATUS/ERROR (e.g. inaccessible tenant_scope
+                # org id) — no "body" wrapper, "message" is an object rather
+                # than a string. Terminal: fail fast.
+                top_message = frame.get("message")
+                if frame.get("type") == "PROMPT_STATUS" and isinstance(top_message, dict) \
+                        and top_message.get("message") == "ERROR":
+                    chat_exc = RuntimeError(
+                        f"Chat PROMPT_STATUS ERROR: {top_message.get('error', top_message)}"
+                    )
+                    logger.error("[%s] Chat error frame: %s", email, top_message)
+                    self._log_chat_message("RECV", "PROMPT_ERROR", frame_elapsed, raw)
+                    break
+
+                # Top-level PROMPT_STATUS/REJECTED.
+                # SESSION_TIME_LIMIT_REACHED: signal the caller to retry with
+                # "yes Continue" on a fresh connection using the returned thread_id.
+                # Any other rejection code is a terminal failure.
+                if frame.get("type") == "PROMPT_STATUS" and top_message == "REJECTED":
+                    code = frame.get("code", "")
+                    self._log_chat_message("RECV", "PROMPT_REJECTED", frame_elapsed, raw)
+                    if code == "SESSION_TIME_LIMIT_REACHED":
+                        session_timeout_thread_id = frame.get("thread_id", "")
+                        logger.warning(
+                            "[%s] SESSION_TIME_LIMIT_REACHED (attempt %d); thread_id=%s",
+                            email, attempt, session_timeout_thread_id,
+                        )
+                    else:
+                        chat_exc = RuntimeError(
+                            f"Chat PROMPT_STATUS REJECTED "
+                            f"(code={code}): {frame.get('display_message') or code}"
+                        )
+                        logger.error("[%s] Chat rejected: %s", email, chat_exc)
+                    break
+
+                body = frame.get("body") if isinstance(frame.get("body"), dict) else {}
+                body_type = body.get("type")
+                body_message = body.get("message")
+
+                if body_type == "PROMPT_STATUS" and body_message == "STARTED":
+                    logger.debug("[%s] Chat prompt STARTED.", email)
+                    self._log_chat_message("RECV", "STARTED", frame_elapsed, raw)
+                    continue
+
+                if body_type == "REASONING" and not ttft_recorded:
+                    ttft_recorded = True
+                    self._log_chat_message("RECV", "REASONING", frame_elapsed, raw)
+                    self._fire_chat_metric("[Chat] time_to_first_token", t_send)
+                    continue
+
+                if body_type == "REASONING":
+                    self._log_chat_message("RECV", "REASONING", frame_elapsed, raw)
+                    continue
+
+                if body_type == "TOOL_RESULT":
+                    logger.debug("[%s] Chat TOOL_RESULT frame received.", email)
+                    self._log_chat_message("RECV", "TOOL_RESULT", frame_elapsed, raw)
+                    continue
+
+                if body_type == "PROMPT_STATUS" and body_message == "ENDED":
+                    self._log_chat_message("RECV", "ENDED", frame_elapsed, raw)
+                    ended = True
+                    break
+
+                # Anything else: still log it so the transcript is complete.
+                self._log_chat_message("RECV", body_type or "UNKNOWN", frame_elapsed, raw)
+        except Exception as exc:
+            chat_exc = exc
+            logger.error("[%s] Chat WebSocket error (attempt %d): %s", email, attempt, exc)
+            self._log_chat_message(
+                "SYS", "ERROR", time.monotonic() - t_send, f"attempt={attempt} {exc}",
+            )
+        finally:
+            try:
+                ws.close()
+            except Exception:
+                pass
+
+        return ended, chat_exc, session_timeout_thread_id
+
+    def _chat_flow(self) -> None:
+        """WebSocket chat flow with automatic SESSION_TIME_LIMIT_REACHED continuation.
+
+        Opens a WebSocket, sends a random query, and streams frames until
+        PROMPT_STATUS/ENDED.  If the server replies with SESSION_TIME_LIMIT_REACHED,
+        the current connection is closed and a new one is opened to send
+        ``"yes Continue"`` with the same thread_id, up to
+        ``chat.max_session_retries`` (default 5) times.  After that limit the
+        chat call is recorded as a failure.  Each successful continuation is
+        counted per-user and surfaced in the HTML report.
+        """
+        email = self._creds.get("Email", "unknown")
+        if not WS_BASE_URL:
+            logger.error("[%s] chat.ws_base_url is not configured; skipping Chat flow.", email)
+            return
+        if not QUERIES:
+            logger.error("[%s] No chat queries loaded; skipping Chat flow.", email)
+            return
+        if not ALL_TENANT_SCOPE:
+            logger.error("[%s] No tenants loaded from Tenant.json; skipping Chat flow.", email)
+            return
+
+        url = (
+            f"{WS_BASE_URL}?Authorization={self._token}"
+            f"&OrganizationId={self._org_id}&agentic=true"
+        )
+
+        t_flow_start = time.monotonic()
+        query = random.choice(QUERIES)
+        thread_id = ""          # empty for the first call; filled in on retry
+        session_continue_count = 0
+        ended = False
+        chat_exc: Optional[BaseException] = None
+
+        for attempt in range(_CHAT_MAX_SESSION_RETRIES + 1):
+            ended, chat_exc, session_timeout_thread_id = self._run_chat_ws(
+                url, query, thread_id, email, attempt,
+            )
+
+            if ended:
+                break
+
+            if session_timeout_thread_id is not None:
+                # SESSION_TIME_LIMIT_REACHED — attempt a continuation.
+                if attempt < _CHAT_MAX_SESSION_RETRIES:
+                    session_continue_count += 1
+                    thread_id = session_timeout_thread_id
+                    query = "yes Continue"
+                    logger.info(
+                        "[%s] Sending session continuation %d/%d (thread_id=%s).",
+                        email, session_continue_count, _CHAT_MAX_SESSION_RETRIES, thread_id,
+                    )
+                    self._log_chat_message(
+                        "SYS", "SESSION_CONTINUE",
+                        time.monotonic() - t_flow_start,
+                        f"continuation={session_continue_count}/{_CHAT_MAX_SESSION_RETRIES} "
+                        f"thread_id={thread_id}",
+                    )
+                    continue  # open a fresh WS for the next attempt
+                else:
+                    chat_exc = RuntimeError(
+                        f"SESSION_TIME_LIMIT_REACHED after {_CHAT_MAX_SESSION_RETRIES} "
+                        "continuation attempt(s)"
+                    )
+                    logger.error("[%s] Max session continuations reached (%d); failing.", email, _CHAT_MAX_SESSION_RETRIES)
+
+            # Non-session-timeout failure (or retries exhausted) — stop retrying.
+            break
+
+        # Accumulate per-user continuation counts for the report.
+        if session_continue_count > 0:
+            self._session_timeout_continuations += session_continue_count
+            _record_user_session_timeouts(email, session_continue_count)
+
+        if ended:
+            self._fire_chat_metric("[Chat] full_response", t_flow_start)
+            self._log_chat_message(
+                "SYS", "DONE", time.monotonic() - t_flow_start,
+                f"status=SUCCESS session_continuations={session_continue_count}",
+            )
+        else:
+            self._fire_chat_metric(
+                "[Chat] full_response", t_flow_start,
+                chat_exc or Exception("Chat call did not complete"),
+            )
+            self._log_chat_message(
+                "SYS", "DONE", time.monotonic() - t_flow_start,
+                f"status=FAILED session_continuations={session_continue_count} error={chat_exc}",
+            )
 
 # ---------------------------------------------------------------------------
 # Event hook: single_journey auto-exit
@@ -871,6 +1356,13 @@ def on_test_stop(environment, **kwargs) -> None:
         )
         return
 
+    # Locust's CSV writer is a background greenlet that only rewrites the file
+    # every CSV_STATS_INTERVAL_SEC and flushes it to disk every
+    # CSV_STATS_FLUSH_INTERVAL_SEC — wait a full cycle so the very last stat
+    # (e.g. a [Chat] full_response fired right before the test stopped) is
+    # guaranteed to be on disk before we read it below.
+    gevent.sleep(CSV_STATS_INTERVAL_SEC + CSV_STATS_FLUSH_INTERVAL_SEC + 1)
+
     stats_csv = Path(csv_prefix + "_stats.csv")
     if not stats_csv.exists():
         logger.warning(
@@ -879,6 +1371,23 @@ def on_test_stop(environment, **kwargs) -> None:
             stats_csv,
         )
         return
+
+    # Snapshot the per-user session-timeout continuation counts collected
+    # during this run and write a JSON sidecar alongside the stats CSV so
+    # the data survives even if report generation fails.
+    with _session_timeout_stats_lock:
+        session_timeout_snapshot = dict(_session_timeout_stats)
+
+    if session_timeout_snapshot:
+        import json as _json  # noqa: PLC0415
+        sidecar = Path(csv_prefix + "_session_timeouts.json")
+        try:
+            sidecar.write_text(
+                _json.dumps(session_timeout_snapshot, indent=2), encoding="utf-8"
+            )
+            logger.info("Session timeout stats  →  %s", sidecar)
+        except Exception as exc:
+            logger.warning("Could not write session timeout sidecar: %s", exc)
 
     # Ensure report_generator module in sys.path (same directory as this file)
     if str(_HERE) not in sys.path:
@@ -891,6 +1400,7 @@ def on_test_stop(environment, **kwargs) -> None:
             description=_test_cfg.get("description", ""),
             config_data=CFG,
             report_name=_test_cfg.get("report_name", ""),
+            session_timeout_stats=session_timeout_snapshot or None,
         )
         logger.info("Custom HTML report  →  %s", out)
     except Exception as exc:

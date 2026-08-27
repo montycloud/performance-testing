@@ -6,3 +6,6 @@ PyYAML>=6.0
 
 # Load .env files (optional; used for future secret injection)
 python-dotenv>=1.0.0
+
+# WebSocket client (used by the Chat flow)
+websocket-client>=1.7.0

@@ -41,20 +41,24 @@ test:
   # Human-readable description of this test run (appears at the top of the HTML report).
   # Describe the scenario: e.g. number of users, iterations, what is being measured.
   description: |
-    Test: Post Fixation and deployment to Stage 3Aug
-    Health Events Standalone Flow
-    Number of Users - 50
-    Mode : Iteration Mode ( 50 Users Doing 20 Iterations Single Signin) 
-    Email: perftestuser1@montycloud.com - perftestuser50@montycloud.com
-    Tenant: User has access to 1 Tenant which has 2 AWS accounts,
-    Total Resources: 741
-    AWS Accounts: 398370181389 and 016257615686
-    Total Findings: 5.49K
+     AI Conversation Chat
+     Total Users 1
+     Tenants 3  ( MSP ,Tenant 1 and Tenant 2 )
+     Query: Tenant Net Cost Report \n Scope \n * Analyze cloud net costs for selected tenant(s) for the last two complete calendar months
+  # Mode : Single User Journey
+  # Email:  Perf Test User 59,perftestuser59@montycloud.com,Tenant 4
+  #         Perf Test User 63,perftestuser63@montycloud.com,Tenant 5
+  #         Perf Test User 67,perftestuser67@montycloud.com,Tenant 6
+  #         Perf Test User 71,perftestuser71@montycloud.com,Tenant 7
+  # Tenant: There are 4 tenants each having 1 users  accesing it and each tenant has 2 AWS accounts
+  # No Org account in this TEST
+  # 1 WAFR scan each account with approx 4LAC findings
+  # Test with 4 users to find the API gateway timeout 
     
   # Name used in the custom report filename: custom_<report_name>_<timestamp>.html
   # Use snake_case or hyphens; avoid spaces. Leave blank to use default "report".
 
-  report_name: "report_Health_events_users_50_run_20_iterations__3Aug"
+  report_name: "report_AI_Chat_User_1_Tenants_3_Medium_Query_net_Cost_for_2_months_run_4"
   # Number of full journeys each user completes in single_journey mode
   # before stopping. Example: --users 1 + iterations: 20 → one user runs
   # the journey 20 times back-to-back. Ignored in timed mode.
@@ -89,4 +93,67 @@ health:
   #                 Skips Home Page and WAFR entirely for this run.
   #
   mode: "standalone"
+
+# Chat flow (WebSocket-based AI chat bot). Uses the same `think_time_min`/
+# `think_time_max` above for the pause before the chat call starts.
+#
+# NOTE: each chat call currently opens ONE WebSocket connection and sends
+# exactly ONE query, then closes (see WEBSOCKET_CHAT_APPROACH.md — multi-turn
+# conversations on a single connection are deferred). `test.iterations` still
+# controls how many times the whole journey (including a fresh chat call)
+# repeats in single_journey mode, same as it does for Home Page/WAFR/Health.
+chat:
+  # false (default) = Chat flow never runs; behaviour is identical to before
+  # this feature was added.
+  enabled: true
+
+  # mode controls how the Chat flow fits into the user journey:
+  #
+  #   appended    – Signin -> Home Page -> WAFR -> (Health) -> think time -> Chat.
+  #   standalone  – Signin -> think time -> Chat only.
+  #                 Skips Home Page, WAFR, and Health entirely for this run.
+  #
+  mode: "standalone"
+
+  # WebSocket endpoint (no trailing slash). Authorization/OrganizationId/
+  # agentic query params are appended automatically. OrganizationId here is
+  # the signed-in user's own org (self._org_id, fetched via /auth/user) —
+  # unrelated to the per-tenant lookup below used for the message body.
+  # e.g. "wss://fw6ru70i23.execute-api.us-east-2.amazonaws.com/stg1"
+  ws_base_url: "wss://fw6ru70i23.execute-api.us-east-2.amazonaws.com/stg1"
+
+  # Path to the chat queries file (relative to this config file, or absolute).
+  # One query per line; a random line is picked for each chat call.
+  queries_file: "./chat_queries.txt"
+
+  # Path to a JSON file listing tenants: [{"ID": "...", "Name": "...", ...}, ...]
+  # Used to build the outgoing message's `tenant_scope`. Each user's `Tenant`
+  # column value in users.csv is matched EXACTLY against an entry's `Name`
+  # here to find the tenant-specific org id (`ID`). If no match is found, the
+  # chat call is skipped for that user and an error is logged (no fallback).
+  tenants_file: "./Tenant.json"
+
+  # Metadata sent with every query.
+  model_id: ""
+  temperature: 0.1
+  top_p: 1
+  top_k: 250
+
+  # Overall deadline (seconds) to wait for the PROMPT_STATUS "ENDED" frame
+  # before marking the chat call as failed (timeout).
+  timeout_seconds: 1500
+
+  # Maximum number of times a chat call may automatically continue after
+  # receiving SESSION_TIME_LIMIT_REACHED.  On each retry the script sends
+  # "yes Continue" on a fresh WebSocket connection with the same thread_id.
+  # After this limit is reached the chat call is recorded as a failure.
+  max_session_retries: 5
+
+  # Optional: path to a per-message transcript log (relative to this config
+  # file, or absolute). Every frame sent/received on the WebSocket is
+  # appended here with a timestamp and elapsed time since the query was
+  # sent — useful for debugging response pacing/content during a run.
+  # Leave blank ("") to disable (only the summary lines already logged via
+  # the normal logger will be shown/captured by Locust's --logfile).
+  transcript_log: "./reports/chat_transcript.log"
 

@@ -48,6 +48,15 @@ cp .env.example .env
 | `test.iterations` | `20` | Journeys per user in `single_journey` mode; ignored in `timed` mode |
 | `health.enabled` | `false` | Whether the Health Events flow runs at all |
 | `health.mode` | `appended` | `appended` (Home Page → WAFR → think time → Health) or `standalone` (Signin → think time → Health only) |
+| `chat.enabled` | `false` | Whether the Chat (WebSocket) flow runs at all |
+| `chat.mode` | `appended` | `appended` (...WAFR/Health → think time → Chat) or `standalone` (Signin → think time → Chat only) |
+| `chat.ws_base_url` | `""` | WebSocket endpoint, e.g. `wss://<id>.execute-api.<region>.amazonaws.com/<stage>` |
+| `chat.queries_file` | `./chat_queries.txt` | Plain-text file, one chat prompt per line; a random line is picked per chat call |
+| `chat.tenants_file` | `./Tenant.json` | JSON list of `{ID, Name, ...}` tenant entries; **all** entries are sent in every chat call's `tenant_scope` |
+| `chat.model_id` / `temperature` / `top_p` / `top_k` | see config.yaml | Metadata sent with every chat query |
+| `chat.timeout_seconds` | `120` | Max time to wait for the `PROMPT_STATUS: ENDED` frame before failing the call |
+| `chat.max_session_retries` | `5` | **Max automatic retries when server returns `SESSION_TIME_LIMIT_REACHED`** — each query gets up to N continuation attempts before failing |
+| `chat.transcript_log` | `./reports/chat_transcript.log` | Optional per-message transcript log; blank disables it |
 
 ### `user_count` vs `--users`
 
@@ -157,6 +166,62 @@ locust -f locustfile.py --headless \
 
 ---
 
+## Running multiple chat-query executions (sweep)
+
+To run the chat test back-to-back across several different `chat_queries` files
+(e.g. different query "types") — same users/concurrency every time, only the
+queries file and description changing — use `run_chat_executions.py` instead of
+editing `config.yaml` by hand for each run.
+
+It reads a manifest (default `executions.yaml`), and for each entry temporarily
+overwrites `config.yaml` with that entry's `chat.queries_file` / `test.description`
+/ `test.report_name`, runs `locust` headlessly, then restores the **original**
+`config.yaml` once the whole sweep finishes (or is interrupted) — so nothing is
+permanently changed in tracked files.
+
+```bash
+# Validate the manifest without running anything or touching config.yaml
+python3 run_chat_executions.py --dry-run
+
+# Run the sweep (uses ./executions.yaml by default)
+python3 run_chat_executions.py
+
+# Use a different manifest (e.g. per pipeline stage)
+python3 run_chat_executions.py --manifest sweeps/my_sweep.yaml
+```
+
+`executions.yaml` schema:
+
+```yaml
+run:                       # shared across every execution — "users stay the same"
+  users: 1
+  spawn_rate: 1
+  run_time: ""             # blank = rely on single_journey auto-stop
+
+executions:
+  - name: net_cost_2_months       # used to suffix every output file
+    queries_file: "./chat_queries_net_cost.txt"
+    description: |
+      AI Conversation Chat — Tenant Net Cost Report query set
+```
+
+Each execution's `name` suffixes all of its output files so nothing gets
+overwritten between runs:
+
+| Output | Path |
+|--------|------|
+| Custom HTML report | `reports/custom_<name>_<timestamp>.html` |
+| Locust HTML report | `reports/locust_report_<name>.html` |
+| Locust CSV stats | `reports/stats_<name>_*.csv` |
+| Chat transcript log | `reports/chat_transcript_<name>.log` |
+
+Exits non-zero if any execution's locust run failed, so it can be used
+directly as a single CI/pipeline step. Runs are sequential within one checkout
+(they share the same `config.yaml`); parallel pipeline jobs get their own
+workspace so this isn't a constraint across jobs.
+
+---
+
 ## Reports
 
 After the test completes, two reports are available:
@@ -164,7 +229,7 @@ After the test completes, two reports are available:
 | Report | Location | Description |
 |--------|----------|-------------|
 | Locust HTML | `reports/locust_report.html` | Built-in Locust report with charts, percentiles, and per-endpoint tables |
-| Custom HTML | `reports/custom_report_<timestamp>.html` | Sectioned report: Auth / Home Page / WAFR Page / Health Events (Health section is empty unless `health.enabled: true`) |
+| Custom HTML | `reports/custom_report_<timestamp>.html` | Sectioned report: Auth / Home Page / WAFR Page / Health Events / Chat (Health and Chat sections are empty unless their `enabled: true`) |
 
 ### Generating the custom report manually
 
@@ -186,6 +251,7 @@ All requests are tagged with a section prefix in the Locust `name` field:
 | `[HomePage]` | Home Page batches 1–5 |
 | `[WAFR]` | WAFR Page batches 1–4 |
 | `[Health]` | Health Events flow (only when `health.enabled: true`) |
+| `[Chat]` | Chat / WebSocket flow (only when `chat.enabled: true`) — two pseudo-requests: `time_to_first_token` and `full_response` |
 
 Parameterised URLs use stable names (e.g. `[WAFR] /war-assessment/workload/{id}/findings`)
 so Locust correctly aggregates repeated calls with different IDs.
@@ -219,6 +285,103 @@ If no `HealthEvents` are returned in step 6, steps 7 are skipped and a warning i
 
 ---
 
+## Chat / WebSocket flow
+
+Disabled by default (`chat.enabled: false`). When enabled, `chat.mode` picks how it
+fits into the journey:
+
+- **`appended`** (default) — the existing journey runs as-is (Home Page → WAFR →
+  optional Health), then after a think time the Chat flow runs.
+- **`standalone`** — Home Page, WAFR, and Health are skipped entirely for the run;
+  each user does Signin → think time → Chat only.
+
+> If both `health.mode` and `chat.mode` are set to `standalone` at the same time,
+> Chat takes precedence (a startup warning is logged) — this combination isn't
+> expected in normal use.
+
+Each chat call:
+
+1. Opens a WebSocket connection to `chat.ws_base_url`, with the signed-in user's
+   JWT (`Authorization`) and `OrganizationId` (the signed-in user's own org,
+   fetched via `/auth/user` during sign-in — same as the Home Page flow) as
+   query params, plus `agentic=true`.
+2. Loads every tenant entry from `chat.tenants_file` (default `Tenant.json`) —
+   this happens once at startup, not per-user.
+3. Sends one query — picked at random from `chat.queries_file` — with an empty
+   `thread_id` (a new conversation), `metadata`
+   (`model_id`/`temperature`/`top_p`/`top_k` from config.yaml), and
+   `tenant_scope` containing **all** tenants from `Tenant.json` (e.g.
+   `[{id1: name1}, {id2: name2}, ...]`) — every user's chat call sends the
+   same full set, regardless of `users.csv`.
+4. Streams frames until a `PROMPT_STATUS: ENDED` frame arrives, or
+   `chat.timeout_seconds` elapses.
+5. Closes the connection.
+
+> **Note the two different org ids in play:** the WebSocket URL's
+> `OrganizationId` query param is always the signed-in user's own org
+> (`self._org_id`, same value used by Home Page/WAFR/Health). The `tenant_scope`
+> in the message body lists tenant-specific ids from `Tenant.json` instead —
+> this is intentional, not a bug.
+
+Two metrics are recorded into Locust's stats under the `[Chat]` prefix:
+
+| Metric | Measures |
+|--------|----------|
+| `[Chat] time_to_first_token` | Time from sending the query to the first `REASONING` frame |
+| `[Chat] full_response` | Time from sending the query to `PROMPT_STATUS: ENDED` (or to a timeout/error). **This one carries pass/fail** for the chat call. |
+
+An "Endpoint request timed out" frame (an informational AWS API Gateway notice,
+not part of the normal frame sequence) is logged as a **warning** and does not
+by itself fail the call — the read-loop keeps listening for further frames.
+
+### Handling Session Timeouts (SESSION_TIME_LIMIT_REACHED)
+
+When the server responds with a `SESSION_TIME_LIMIT_REACHED` rejection:
+
+```json
+{
+  "type": "PROMPT_STATUS",
+  "message": "REJECTED",
+  "code": "SESSION_TIME_LIMIT_REACHED",
+  "display_message": "Marvin has reached the time limit for this session. Do you want to continue?",
+  "thread_id": "..."
+}
+```
+
+The test framework **automatically retries** the chat flow instead of failing:
+
+1. **Detects** the `SESSION_TIME_LIMIT_REACHED` code in the rejection frame
+2. **Closes** the current WebSocket connection
+3. **Opens a new connection** and sends `{"query": "yes Continue", "thread_id": <from-rejection>, ...}` with the original tenant scope and metadata
+4. **Repeats** up to `chat.max_session_retries` times (default: 5 attempts per query)
+5. **Fails** the query if all retries are exhausted
+
+Each chat query gets its own independent retry budget (not shared across calls). The HTML report includes:
+- A **"Session Continuations"** summary card showing total retry count
+- A **detailed per-user table** showing how many continuations each user triggered
+
+Example config:
+```yaml
+chat:
+  max_session_retries: 5    # Allow up to 5 continuation attempts per query
+```
+
+The session timeout stats are also written to a JSON sidecar file (`<csv-prefix>_session_timeouts.json`) for archival.
+
+Set `chat.transcript_log` (default `./reports/chat_transcript.log`) to get a
+full per-message transcript — every frame sent/received, with a timestamp and
+elapsed time since the query was sent. Leave it blank to disable.
+
+> **Note:** each chat call currently opens **one connection and sends one
+> query**, then closes — multi-turn conversations reusing a single connection
+> are not yet supported. `test.iterations` behaves exactly as it does for
+> Home Page/WAFR/Health: it controls how many times the *whole journey*
+> (including a fresh chat call) repeats in `single_journey` mode. See
+> [WEBSOCKET_CHAT_APPROACH.md](WEBSOCKET_CHAT_APPROACH.md) for the full design
+> rationale and what's deferred.
+
+---
+
 ## Troubleshooting
 
 | Symptom | Likely cause | Fix |
@@ -228,6 +391,10 @@ If no `HealthEvents` are returned in step 6, steps 7 are skipped and a warning i
 | `No WAFR workloads returned` | User has no PENDING workloads | Create workloads for test users or use a different environment |
 | Custom HTML report not generated | `--csv` flag not passed | Add `--csv reports/stats` to your Locust command |
 | Connection errors | Wrong `base_url` | Check `api.base_url` in `config.yaml` |
+| `chat.ws_base_url is not configured` | `chat.enabled: true` but `ws_base_url` blank | Set `chat.ws_base_url` in `config.yaml` |
+| `No chat queries loaded` | `chat_queries.txt` missing or empty | Check `chat.queries_file` path and that the file has at least one non-comment line |
+| `No tenants loaded from Tenant.json` | `Tenant.json` is missing, empty, or has no entries with an `ID` | Check `chat.tenants_file` path and that `Tenant.json` has at least one valid entry |
+| Chat call times out (`No PROMPT_STATUS/ENDED frame within Ns`) | Backend took longer than `chat.timeout_seconds`, or connection dropped | Increase `chat.timeout_seconds`; check `ws_base_url`/token validity |
 
 ---
 
@@ -238,8 +405,11 @@ API Performance test/
 ├── locustfile.py          Main Locust scenario
 ├── config.yaml            Test configuration
 ├── report_generator.py    Custom HTML report builder
+├── chat_queries.txt       Chat prompts (one per line) used by the Chat flow
+├── Tenant.json            Tenant entries; all are sent in every chat call's tenant_scope
 ├── requirements.txt       Python dependencies
 ├── README.md              This file
+├── WEBSOCKET_CHAT_APPROACH.md   Design notes for the Chat/WebSocket flow
 ├── .env.example           Environment variable template
 └── reports/               Generated reports (git-ignored)
     ├── locust_report.html
