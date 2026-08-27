@@ -1,0 +1,12 @@
+# Python — bytecode caches, recreated on import
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Virtualenv
+.venv/
+
+.DS_Store
+
+# Load-test run output (logger.py recreates the dir on each run)
+knowledgebase/loadtest/logs/

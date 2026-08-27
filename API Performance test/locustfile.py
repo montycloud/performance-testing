@@ -429,10 +429,11 @@ class MontyCloudUser(HttpUser):
                 resp.failure(f"HTTP {resp.status_code}")
                 logger.warning("FAIL  %-60s  →  HTTP %d", name, resp.status_code)
             else:
-                resp.success()
                 try:
                     body = resp.json() or {}
+                    resp.success()
                 except Exception:
+                    resp.failure("Response is not valid JSON")
                     body = {}
         return body
 

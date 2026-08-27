@@ -41,11 +41,11 @@ cp .env.example .env
 | `api.base_url` | `https://stg1-api.montycloud.com` | Target API environment |
 | `api.mc_debug_mode` | `true` | Passed as `MC_DEBUG_MODE` in every signin payload |
 | `api.timeout_seconds` | `40` | Per-request timeout |
-| `test.users_csv` | `../Scripts/CreateChildUsers/users.csv` | Path to users CSV (relative to this directory or absolute) |
-| `test.user_count` | `10` | **How many users to load from the CSV (first N rows)** |
-| `test.spawn_rate` | `2` | Default spawn rate (users/second); override with `--spawn-rate` |
-| `test.run_time` | `5m` | Default run time; override with `--run-time` |
-| `test.iterations` | `1` | Journeys per user in `single_journey` mode; ignored in `timed` mode |
+| `test.users_csv` | `./users.csv` | Path to users CSV (relative to this directory or absolute) |
+| `test.user_count` | `50` | **How many users to load from the CSV (first N rows)** |
+| `test.spawn_rate` | `50` | Informational only (shown in report); set actual value via `--spawn-rate` |
+| `test.run_time` | `5m` | Informational only (shown in report); set actual value via `--run-time` |
+| `test.iterations` | `20` | Journeys per user in `single_journey` mode; ignored in `timed` mode |
 | `health.enabled` | `false` | Whether the Health Events flow runs at all |
 | `health.mode` | `appended` | `appended` (Home Page → WAFR → think time → Health) or `standalone` (Signin → think time → Health only) |
 | `chat.enabled` | `false` | Whether the Chat (WebSocket) flow runs at all |

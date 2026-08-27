@@ -1,0 +1,22 @@
+# Stage 1 config: creates KB collections under one MSP, ready for load-test uploads.
+# Root password is NOT stored here — pass --root-password or set KB_ROOT_PASSWORD.
+env: stg1
+mc_debug_mode: true  # sent as MC_DEBUG_MODE on /auth/signin; false for prod
+
+root:
+  email: manish.hemnani@montycloud.com
+
+# Cookies required by the backend on collection-creation and upload requests
+# (not sent on /auth/signin). Values are placeholders — fill in real ones.
+cookies:
+  mp_d15f5dc5cf600d8adee482073ae18a5c_mixpanel: ""
+  mp_f4a612b533e8ea10a96dc816d8bc8af1_mixpanel: ""
+  mp_dc1fe312502e09db352a1a13250be276_mixpanel: ""
+
+collections:
+  - name: PT-Collection-3
+    description: Performance test collection 1
+    category: tenant
+  # name: RANDOM auto-generates a "PT-Collection-<timestamp>" name + description; category stays as set below
+  # - name: RANDOM
+  #   category: tenant

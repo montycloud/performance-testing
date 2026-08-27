@@ -16,10 +16,10 @@ test:
   # Locust --users controls concurrency; user_count controls which credentials are used.
   # Example: user_count=10 + --users 10  → 10 unique users, each gets a unique credential
   #          user_count=10 + --users 20  → 10 credentials recycled round-robin at 20 concurrency
-  user_count: 1
+  user_count: 50
 
   # Default spawn rate (users/second). Override via locust --spawn-rate N
-  spawn_rate: 1
+  spawn_rate: 50
 
   # Default run time. Override via locust --run-time <value>
   run_time: "5m"
@@ -62,7 +62,7 @@ test:
   # Number of full journeys each user completes in single_journey mode
   # before stopping. Example: --users 1 + iterations: 20 → one user runs
   # the journey 20 times back-to-back. Ignored in timed mode.
-  iterations: 1
+  iterations: 20
 
   # Think time (seconds) between the Home Page and WAFR Page flows.
   # Each iteration sleeps a random duration in [think_time_min, think_time_max].
@@ -82,7 +82,7 @@ test:
 health:
   # false (default) = Health Events calls never run; behaviour is identical
   # to before this feature was added.
-  enabled: false
+  enabled: true
 
   # mode controls how the Health Events flow fits into the user journey:
   #
