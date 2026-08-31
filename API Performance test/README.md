@@ -220,6 +220,39 @@ directly as a single CI/pipeline step. Runs are sequential within one checkout
 (they share the same `config.yaml`); parallel pipeline jobs get their own
 workspace so this isn't a constraint across jobs.
 
+### Extracting a per-execution summary CSV
+
+If you already have the generated HTML/CSV artifacts for a sweep and want one
+row per execution for spreadsheet-style comparison, use
+`extract_execution_summary.py`.
+
+```bash
+python3 extract_execution_summary.py \
+  --manifest executions_wafr.yaml \
+  --reports-dir "reports/reports_executed_on_ec2/AI_conversation_baseline_with_continue/reports/WAFR/1_parallel_users"
+```
+
+By default it writes `executions_wafr_summary.csv` inside the reports
+directory. The output columns are:
+
+- `Type`
+- `Number of Chats`
+- `Number of Tenants`
+- `Domain / Area`
+- `Query(Intials)`
+- `Complexity`
+- `Completed in`
+- `time_to_first_token`
+- `Errors if Any`
+
+Behavior notes:
+
+- `Completed in` is the overall test duration.
+- `time_to_first_token` is the p95 value from the Locust stats row
+  `[Chat] time_to_first_token`.
+- `Errors if Any` combines `failures.csv`, `exceptions.csv`, and
+  `session_timeouts.json` when present.
+
 ---
 
 ## Reports

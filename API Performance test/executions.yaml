@@ -16,7 +16,7 @@
 # "user_count vs --users" table) so each concurrent user gets a unique login.
 run:
   users: 2
-  spawn_rate: 2
+  spawn_rate: 1
   run_time: ""   # blank = rely on single_journey mode's auto-stop (see config.yaml)
 
 executions:

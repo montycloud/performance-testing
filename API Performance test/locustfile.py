@@ -30,6 +30,7 @@ import re
 import sys
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -1394,11 +1395,16 @@ def on_test_stop(environment, **kwargs) -> None:
 
     try:
         import report_generator as rg  # noqa: PLC0415
+        report_name = _test_cfg.get("report_name", "")
+        # Write next to the --csv prefix, not report_generator's own default dir.
+        name_slug = report_name.strip() if report_name.strip() else "report"
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         out = rg.generate(
             stats_csv,
+            output=stats_csv.parent / f"custom_{name_slug}_{ts}.html",
             description=_test_cfg.get("description", ""),
             config_data=CFG,
-            report_name=_test_cfg.get("report_name", ""),
+            report_name=report_name,
             session_timeout_stats=session_timeout_snapshot or None,
         )
         logger.info("Custom HTML report  →  %s", out)

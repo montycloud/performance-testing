@@ -31,6 +31,7 @@ python3 -m locust -f locustfile.py --headless --users N --spawn-rate R \
 | `Tenant.json` | User-provided list of `{ID, Name, ...}` tenant entries; **all** entries are sent in every chat call's `tenant_scope` (built once at module load, not per-user). |
 | `executions.yaml` | Manifest for `run_chat_executions.py` — a list of `{name, queries_file, description}` runs sharing one `users`/`spawn_rate`/`run_time` block. |
 | `run_chat_executions.py` | Standalone sweep runner — see "Chat-query sweep runner" section below. Does **not** modify `locustfile.py`/`report_generator.py`. |
+| `extract_execution_summary.py` | Standalone post-processing helper that reads one `executions_*.yaml` manifest plus a reports folder and emits one CSV row per execution. |
 
 ## The five flows (all in `MontyCloudUser`)
 
@@ -126,6 +127,36 @@ without leaving a lasting diff in `config.yaml`. Design:
 
 See the README's "Running multiple chat-query executions (sweep)" section for
 usage.
+
+## Execution summary extractor (`extract_execution_summary.py`)
+
+Added as a lightweight post-processing step for already-generated sweep
+artifacts. It does not rerun Locust or regenerate reports; it only reads the
+manifest plus files already present in a reports directory.
+
+- Inputs: one `executions_*.yaml` file and a reports directory containing
+   `custom_<name>_*.html`, `stats_<name>_stats.csv`, `stats_<name>_failures.csv`,
+   `stats_<name>_exceptions.csv`, and optionally
+   `stats_<name>_session_timeouts.json`.
+- Matching key: each execution's `name` field.
+- Output: CSV rows with `Type`, `Number of Chats`, `Number of Tenants`,
+   `Domain / Area`, `Query(Intials)`, `Complexity`, `Completed in`,
+   `time_to_first_token`, and `Errors if Any`.
+- `Completed in` is the overall test duration, read from the custom HTML
+   summary card when available or derived from the `Aggregated` stats row as a
+   fallback.
+- `time_to_first_token` is the p95 value from the `[Chat] time_to_first_token`
+   stats row.
+- `Errors if Any` merges standard Locust failures/exceptions with chat session
+   continuation counts from `session_timeouts.json`.
+
+Example:
+
+```bash
+python3 extract_execution_summary.py \
+   --manifest executions_wafr.yaml \
+   --reports-dir "reports/reports_executed_on_ec2/AI_conversation_baseline_with_continue/reports/WAFR/1_parallel_users"
+```
 
 ## Known deferred work / open items
 
