@@ -1,0 +1,6 @@
+.env
+users.csv
+logs/
+reports/
+__pycache__/
+dbquery_logs

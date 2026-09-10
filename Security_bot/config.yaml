@@ -1,0 +1,42 @@
+api:
+  base_url: "https://stg1-api.montycloud.com"
+  mc_debug_mode: true
+  timeout_seconds: 60
+
+auth:
+  # Value sent as the "RefreshToken" field of /auth/refresh-token.
+  # refresh_token = the JWE returned by signin as "RefreshToken" (verified via curl).
+  refresh_token_source: "refresh_token"     # refresh_token | access_token
+  # Org id placed in the d2oid cookie on the switch-context call.
+  switch_cookie_org: "target"               # target | root
+
+bot:
+  id: "e9a4c73c-4431-4b58-bb6a-6a8bb2444299"
+  insights_path: "/bots/{bot_id}/insights"
+  rescan_path: "/bots/api/{bot_id}/rescan"
+
+run:
+  users: 8
+  users_csv: "users.csv"
+  organizations_file: "organizations.json"
+  exclude_root_org: false                   # orgs are assigned strictly unique, cap = pool size
+  findings_limit: 100                       # page size requested from /insights
+  findings_statuses: ["FAILED"]            # sent as KeywordSearch; ERROR is excluded by the API
+  rescan_count: 10                          # findings rescanned per user; 0 = all matching
+  logs_dir: "logs"
+
+rescan:
+  scope: "FINDING"
+  # The API rejects multiple ids ("FindingIds must contain exactly one id"),
+  # so each finding is a separate request.
+  parallel: true
+  max_workers: 10
+
+db:
+  enabled: false
+  host: ""
+  port: 3306
+  database: ""
+  user: ""
+  password_env_var: "SECURITY_BOT_DB_PASSWORD"
+  query_template: "SELECT * FROM rescan WHERE rescan_id = %(rescan_id)s"

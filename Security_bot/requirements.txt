@@ -1,0 +1,5 @@
+requests>=2.31.0
+PyYAML>=6.0
+python-dotenv>=1.0.0
+locust>=2.20.0
+pymysql>=1.1.0
