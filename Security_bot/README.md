@@ -6,12 +6,11 @@ See [Security_bot.prd](Security_bot.prd) for the original requirement.
 
 ## Quick start (do these first)
 
-1. **Create/activate a virtualenv and install deps** (a shared repo venv already exists at
-   `../.venv` — reuse it instead of creating a new one if possible):
+1. **Create/activate a virtualenv and install deps** :
    ```bash
    cd Security_bot
-   python3 -m venv ../.venv        # skip if ../.venv already exists
-   ../.venv/bin/pip install -r requirements.txt
+   python3 -m venv .venv        
+   pip install -r requirements.txt
    ```
 
 2. **Fill in `users.csv`** (copy from `users.csv.example` if it doesn't exist yet).
