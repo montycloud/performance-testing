@@ -21,7 +21,7 @@ import argparse
 import csv
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 # Reports are written here unless the caller provides an explicit output path.
 _REPORTS_DIR = Path(__file__).parent / "reports"
@@ -120,6 +120,21 @@ def _duration_from_aggregated(aggregated: Optional[Dict[str, str]]) -> Optional[
 _CRIT_FAIL_PCT = 50.0    # endpoints with failure rate >= this are highlighted
 _CRIT_AVG_MS   = 20_000  # endpoints with avg response >= this are highlighted
 
+# Cost Dashboard "grouped summary" rows — combine several distinct [Cost]
+# request names into one virtual row via weighted averaging. Names must match
+# the `name=` values used in cost_dashboard_locustfile.py exactly.
+_COST_GROUPS: List[Tuple[str, List[str]]] = [
+    ("/cost-dashboard", ["[Cost] cost-dashboard", "[Cost] lookup"]),
+    ("/cost-by-charge-type", ["[Cost] cost-by-charge-type"]),
+    ("/cost-dashboard/_proxy", [
+        "[Cost] cost-summary (by-account)",
+        "[Cost] cost-summary (by-service)",
+        "[Cost] region-summary",
+        "[Cost] resource-summary",
+        "[Cost] spend-trend",
+    ]),
+]
+
 
 # ---------------------------------------------------------------------------
 # HTML builders
@@ -177,6 +192,63 @@ def _table_html(rows: List[Dict[str, str]], empty_msg: str = "No data.") -> str:
     )
 
 
+def _cost_grouped_summary_html(cost_rows: List[Dict[str, str]]) -> str:
+    """Render the grouped-summary table defined by _COST_GROUPS.
+
+    Each group combines several distinct [Cost] endpoint rows into one
+    weighted-average row (e.g. /cost-dashboard = avg(cost-dashboard, lookup)).
+    Groups with no matching rows in this run are skipped.
+    """
+    by_name = {r.get(_COL_NAME, ""): r for r in cost_rows}
+    tbody_rows: List[str] = []
+    for group_name, member_names in _COST_GROUPS:
+        members = [by_name[n] for n in member_names if n in by_name]
+        if not members:
+            continue
+        totals = _summary_totals(members)
+        fails = int(totals["fails"].replace(",", "") or 0)
+        fcls = ' class="fail"' if fails > 0 else ""
+        tbody_rows.append(
+            f"<tr><td class='name'>{group_name}</td>"
+            f"<td>{totals['reqs']}</td><td>{totals['fails']}</td>"
+            f"<td{fcls}>{totals['fail_pct']}</td><td>{totals['avg_rt']}</td></tr>"
+        )
+    if not tbody_rows:
+        return ""
+    return (
+        "<h3 style='margin:20px 0 10px;font-size:.9rem;color:#1a2b3c;'>Grouped Summary</h3>"
+        "<div class='table-wrap'>"
+        "<table><thead><tr><th>Group</th><th># Requests</th><th># Failures</th>"
+        "<th>Failure %</th><th>Avg Response</th></tr></thead>"
+        f"<tbody>{''.join(tbody_rows)}</tbody></table></div>"
+    )
+
+
+def _cost_section_html(cost_rows: List[Dict[str, str]]) -> str:
+    """Render the full Cost Dashboard section: grouped summary + all endpoints.
+
+    Returns "" (section omitted entirely) when there are no [Cost] rows, same
+    as every other section when its flow was disabled/not run.
+    """
+    if not cost_rows:
+        return ""
+    badge = f'<span class="badge">{len(cost_rows)} endpoint{"s" if len(cost_rows) != 1 else ""}</span>'
+    totals = _summary_totals(cost_rows)
+    meta = (
+        f" &nbsp;\u00b7&nbsp; {totals['reqs']} reqs &nbsp;\u00b7&nbsp; "
+        f"avg {totals['avg_rt']} &nbsp;\u00b7&nbsp; {totals['fail_pct']} failures"
+    )
+    grouped_html = _cost_grouped_summary_html(cost_rows)
+    return (
+        "<section>"
+        f'<div class="section-title cost">Cost Dashboard {badge}{meta}</div>'
+        f"{grouped_html}"
+        "<h3 style='margin:20px 0 10px;font-size:.9rem;color:#1a2b3c;'>All Endpoints</h3>"
+        f"{_table_html(cost_rows, 'No [Cost] data found.')}"
+        "</section>"
+    )
+
+
 def _card(label: str, value: str, sub: str = "") -> str:
     sub_html = f'<div class="sub">{sub}</div>' if sub else ""
     return (
@@ -194,6 +266,7 @@ def _throughput_section_html(
     wafr_rows: List[Dict],
     health_rows: List[Dict],
     chat_rows: List[Dict],
+    cost_rows: List[Dict],
     duration_s: Optional[float],
 ) -> str:
     """Render the per-section throughput breakdown table."""
@@ -214,6 +287,7 @@ def _throughput_section_html(
         ("WAFR Page",      "dot-wafr",   wafr_rows),
         ("Health Events",  "dot-health", health_rows),
         ("Chat",           "dot-chat",   chat_rows),
+        ("Cost Dashboard", "dot-cost",   cost_rows),
     ]
     tbody = ""
     for label, cls, rows in sections:
@@ -228,7 +302,7 @@ def _throughput_section_html(
             f"<td>{avg:,.0f} ms</td></tr>"
         )
     # Totals
-    t, f, s, fp, rps, srps, avg = _stats(auth_rows + home_rows + wafr_rows + health_rows + chat_rows)
+    t, f, s, fp, rps, srps, avg = _stats(auth_rows + home_rows + wafr_rows + health_rows + chat_rows + cost_rows)
     fcls = ' class="fail"' if f > 0 else ""
     tbody += (
         f"<tr>"
@@ -381,6 +455,7 @@ section { margin-bottom: 48px; }
 .section-title.auth   { border-left-color: #059669; background: #ecfdf5; }
 .section-title.health  { border-left-color: #ea580c; background: #fff7ed; }
 .section-title.chat    { border-left-color: #db2777; background: #fdf2f8; }
+.section-title.cost    { border-left-color: #16a34a; background: #f0fdf4; }
 .badge { font-size: .72rem; background: rgba(0,0,0,.12);
          border-radius: 12px; padding: 2px 9px; font-weight: 600; }
 
@@ -417,6 +492,7 @@ footer { text-align: center; color: #aaa; font-size: .75rem; padding: 28px; }
 .dot-wafr   { color: #7c3aed; font-size: 1.1em; }
 .dot-health { color: #ea580c; font-size: 1.1em; }
 .dot-chat   { color: #db2777; font-size: 1.1em; }
+.dot-cost   { color: #16a34a; font-size: 1.1em; }
 .dot-total  { color: #0891b2; font-size: 1.1em; }
 
 /* Critical issues section */
@@ -499,18 +575,20 @@ def _full_html(
     wafr_rows: List[Dict],
     health_rows: List[Dict],
     chat_rows: List[Dict],
+    cost_rows: List[Dict],
     aggregated_row: Optional[Dict],
     description: str = "",
     config_data: Optional[Dict] = None,
     session_timeout_stats: Optional[Dict] = None,
 ) -> str:
-    all_rows = auth_rows + home_rows + wafr_rows + health_rows + chat_rows
+    all_rows = auth_rows + home_rows + wafr_rows + health_rows + chat_rows + cost_rows
     overall = _summary_totals(all_rows)
     hp_sum  = _summary_totals(home_rows)
     wafr_sum = _summary_totals(wafr_rows)
     auth_sum = _summary_totals(auth_rows)
     health_sum = _summary_totals(health_rows)
     chat_sum = _summary_totals(chat_rows)
+    cost_sum = _summary_totals(cost_rows)
 
     duration_s = _duration_from_aggregated(aggregated_row)
 
@@ -541,16 +619,18 @@ def _full_html(
         _card("WAFR Page",             wafr_sum["reqs"], f"avg {wafr_sum['avg_rt']} · {wafr_sum['fail_pct']} fail"),
         _card("Health Events",         health_sum["reqs"], f"avg {health_sum['avg_rt']} · {health_sum['fail_pct']} fail"),
         _card("Chat",                  chat_sum["reqs"], f"avg {chat_sum['avg_rt']} · {chat_sum['fail_pct']} fail"),
+        _card("Cost Dashboard",        cost_sum["reqs"], f"avg {cost_sum['avg_rt']} · {cost_sum['fail_pct']} fail"),
         _card("Session Continuations", str(_st_total),   _st_sub),
     ])
 
     def _section(title: str, css_class: str, rows: List[Dict], empty: str) -> str:
+        if not rows:
+            return ""  # hide sections entirely when their flow didn't run
         badge = f'<span class="badge">{len(rows)} endpoint{"s" if len(rows) != 1 else ""}</span>'
         totals = _summary_totals(rows)
         meta = (
             f" &nbsp;·&nbsp; {totals['reqs']} reqs &nbsp;·&nbsp; "
             f"avg {totals['avg_rt']} &nbsp;·&nbsp; {totals['fail_pct']} failures"
-            if rows else ""
         )
         return (
             f"<section>"
@@ -578,13 +658,14 @@ def _full_html(
 </header>
 <main>
     <div class="cards">{cards_html}</div>
-    {_throughput_section_html(auth_rows, home_rows, wafr_rows, health_rows, chat_rows, duration_s)}
+    {_throughput_section_html(auth_rows, home_rows, wafr_rows, health_rows, chat_rows, cost_rows, duration_s)}
   {_critical_failures_section_html(all_rows)}
   {_section("Authentication", "auth", auth_rows, "No [Auth] data found.")}
   {_section("Home Page", "",     home_rows, "No [HomePage] data found.")}
   {_section("WAFR Page", "wafr", wafr_rows, "No [WAFR] data found.")}
   {_section("Health Events", "health", health_rows, "No [Health] data found.")}
   {_section("Chat", "chat", chat_rows, "No [Chat] data found.")}
+  {_cost_section_html(cost_rows)}
   {_session_timeout_section_html(session_timeout_stats or {})}
   {config_html}
 </main>
@@ -651,6 +732,7 @@ def generate(
     wafr_rows: List[Dict] = []
     health_rows: List[Dict] = []
     chat_rows: List[Dict] = []
+    cost_rows: List[Dict] = []
 
     for row in all_rows:
         name = row.get(_COL_NAME, "")
@@ -667,11 +749,14 @@ def generate(
             health_rows.append(row)
         elif name.startswith("[Chat]"):
             chat_rows.append(row)
+        elif name.startswith("[Cost]"):
+            cost_rows.append(row)
         # rows with unknown prefixes are silently ignored
 
     generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     html = _full_html(
         generated_at, stats_csv, auth_rows, home_rows, wafr_rows, health_rows, chat_rows,
+        cost_rows,
         aggregated_row,
         description=description,
         config_data=config_data,

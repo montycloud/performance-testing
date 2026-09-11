@@ -1,0 +1,94 @@
+api:
+  # Base URL of the MontyCloud API (no trailing slash)
+  base_url: "https://stg1-api.montycloud.com"
+  # Pass MC_DEBUG_MODE=true in every signin payload (bypasses CAPTCHA checks)
+  mc_debug_mode: true
+  # Per-request timeout in seconds
+  timeout_seconds: 40
+
+test:
+  # Path to the users CSV file (relative to this config file, or absolute)
+  # CSV must have columns: Name, Email, Password, New Password
+  users_csv: "./users.csv"
+
+  # How many users to load from the CSV (first N rows).
+  # Locust --users controls concurrency; user_count controls which credentials are used.
+  user_count: 10
+
+  # Default spawn rate (users/second). Override via locust --spawn-rate N
+  spawn_rate: 10
+
+  # Default run time. Override via locust --run-time <value>
+  run_time: "5m"
+
+  # single_journey  – each user completes `iterations` full journeys then stops.
+  #                   Test exits automatically once all users finish. Use with
+  #                   --users N (no --run-time needed).
+  # timed           – users loop continuously until --run-time expires.
+  run_mode: "single_journey"
+
+  # Journeys per user in single_journey mode (ignored in timed mode).
+  iterations: 1
+
+  # Human-readable description shown at the top of the HTML report.
+  description: |
+    Cost Dashboard API Performance Test
+    Standalone flow: Signin -> Cost Dashboard (bootstrap, Total Spend x date
+    ranges, tag-keys lookup, Spend Trend tab x date ranges).
+
+  # Name used in the custom report filename: custom_<report_name>_<timestamp>.html
+  report_name: "cost_dashboard"
+
+  # Think time (seconds) between Signin and the Cost Dashboard flow starting.
+  think_time_min: 2
+  think_time_max: 5
+
+  # Think time (seconds) between each date-range preset firing within the
+  # Cost Dashboard flow (simulates the user picking a new date range / tab).
+  cost_dashboard_think_time_min: 1
+  cost_dashboard_think_time_max: 3
+
+# Cost Dashboard flow (standalone-only for now; see LOCUST_PLAN discussion in
+# Cost_dashboard_API/ for how an "appended" mode could reuse this flow later
+# from the main locustfile.py).
+cost_dashboard:
+  enabled: true
+
+  # Kept for parity with health:/chat: sections in config.yaml. Only
+  # "standalone" is implemented today (Signin -> think time -> Cost Dashboard).
+  mode: "standalone"
+
+  # Always send ChargeTypes.exclude=[Credit,Refund] on every date-range pass
+  # except the very first (no-filter) Batch 2 call, matching the HAR capture.
+  charge_types_exclude: true
+
+  # Include the initial no-ChargeTypes-filter pass observed as the very first
+  # Batch 2 firing in the HAR (before the exclude-filter toggle was turned on).
+  include_no_filter_pass: true
+
+  # Date range (days back from today) used for that initial no-filter pass.
+  # The HAR's first pass was StartDate=2026-08-01 / EndDate=2026-09-10 (~40 days).
+  default_days_back: 40
+
+  # Date-range presets the flow cycles through every iteration, expressed as
+  # "days back from today" (StartDate = today - days_back, EndDate = today).
+  # Matches the 6 ranges observed in the HAR (2yr/1yr/6mo/3mo/30d/7d).
+  date_range_presets:
+    - label: "2y"
+      days_back: 730
+    - label: "1y"
+      days_back: 365
+    - label: "6m"
+      days_back: 183
+    - label: "3m"
+      days_back: 91
+    - label: "30d"
+      days_back: 30
+    - label: "7d"
+      days_back: 7
+
+  # Query params for the Batch 3 tag-keys lookup.
+  tag_keys_limit: 20
+
+  # Query params for the Batch 4 spend-breakdown-summary / resource-count calls.
+  breakdown_limit: 25
