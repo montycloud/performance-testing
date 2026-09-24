@@ -13,7 +13,7 @@ test:
 
   # How many users to load from the CSV (first N rows).
   # Locust --users controls concurrency; user_count controls which credentials are used.
-  user_count: 10
+  user_count: 1
 
   # Default spawn rate (users/second). Override via locust --spawn-rate N
   spawn_rate: 10
@@ -28,7 +28,7 @@ test:
   run_mode: "single_journey"
 
   # Journeys per user in single_journey mode (ignored in timed mode).
-  iterations: 1
+  iterations: 5
 
   # Human-readable description shown at the top of the HTML report.
   description: |
@@ -47,6 +47,11 @@ test:
   # Cost Dashboard flow (simulates the user picking a new date range / tab).
   cost_dashboard_think_time_min: 1
   cost_dashboard_think_time_max: 3
+
+  # Think time (seconds) after Batch 1 (bootstrap) and Batch 3 (tag-keys),
+  # simulating the user pausing between widget groups loading.
+  batch_think_time_min: 3
+  batch_think_time_max: 4
 
 # Cost Dashboard flow (standalone-only for now; see LOCUST_PLAN discussion in
 # Cost_dashboard_API/ for how an "appended" mode could reuse this flow later

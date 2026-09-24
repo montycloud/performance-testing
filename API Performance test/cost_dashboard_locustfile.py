@@ -83,6 +83,10 @@ _THINK_MAX: float = float(_test_cfg.get("think_time_max", 5))
 _CD_THINK_MIN: float = float(_test_cfg.get("cost_dashboard_think_time_min", _THINK_MIN))
 _CD_THINK_MAX: float = float(_test_cfg.get("cost_dashboard_think_time_max", _THINK_MAX))
 
+# Think time after Batch 1 and Batch 3 (single-shot batches).
+_BATCH_THINK_MIN: float = float(_test_cfg.get("batch_think_time_min", 3))
+_BATCH_THINK_MAX: float = float(_test_cfg.get("batch_think_time_max", 4))
+
 _RUN_MODE: str = _test_cfg.get("run_mode", "single_journey").strip().lower()
 _ITERATIONS: int = max(1, int(_test_cfg.get("iterations", 1)))
 
@@ -199,6 +203,7 @@ class CostDashboardUser(HttpUser):
                               "[Cost] lookup",
                               params={"CloudProvider": "AWS"}),
         ])
+        gevent.sleep(random.uniform(_BATCH_THINK_MIN, _BATCH_THINK_MAX))
 
         # ── Batch 2 ── "Total Spend" widgets, once per date-range preset ──
         passes: List[Dict[str, Any]] = []
@@ -263,6 +268,7 @@ class CostDashboardUser(HttpUser):
                 params={"Limit": _TAG_KEYS_LIMIT, "Offset": 0, "CloudProvider": "AWS"},
             ),
         ])
+        gevent.sleep(random.uniform(_BATCH_THINK_MIN, _BATCH_THINK_MAX))
 
         # ── Batch 4 ── "Spend Trend" tab widgets, once per date-range preset ──
         for preset in _DATE_RANGE_PRESETS:
