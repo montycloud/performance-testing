@@ -157,3 +157,57 @@ chat:
   # the normal logger will be shown/captured by Locust's --logfile).
   transcript_log: "./reports/chat_transcript.log"
 
+# Inventory Summary flow — run via the SEPARATE inventory_locustfile.py
+# (its own HttpUser, its own on_test_start/on_test_stop hooks), not part of
+# MontyCloudUser's full_journey. It shares this file's `api:` block above but
+# is otherwise fully self-contained (own users_csv/iterations/think times)
+# so it never interferes with the main Home/WAFR/Health/Chat journey.
+inventory:
+  enabled: true
+
+  # Kept for parity with health:/chat: above. Only "standalone" is
+  # implemented today (Signin -> think time -> Inventory).
+  mode: "standalone"
+
+  # Cloud provider sent as CloudProvider on every /org/inventory-summary call.
+  cloud_provider: "AWS"
+
+  # SummaryType values fired in the single Inventory batch (the "by-account"
+  # tab load, which fetches all three summary widgets together). Batch 1
+  # (by-region/by-resourcetype standalone) was dropped per confirmation.
+  batch_2_summary_types:
+    - "by-account"
+    - "by-region"
+    - "by-resourcetype"
+
+  # Path to the users CSV file (relative to this config file, or absolute).
+  users_csv: "./users.csv"
+  user_count: 1
+
+  # Default spawn rate/run time (informational; override via Locust CLI flags).
+  spawn_rate: 10
+  run_time: "5m"
+  run_mode: "single_journey"
+
+  # Journeys per user in single_journey mode (ignored in timed mode).
+  iterations: 1
+
+  # Human-readable description shown at the top of the HTML report.
+  description: |
+    Inventory API Performance Test
+    Standalone flow: Signin -> Inventory Summary (by-account + by-region +
+    by-resourcetype, parallel).
+    User count: 1 
+
+  # Name used in the custom report filename: custom_<report_name>_<timestamp>.html
+  report_name: "inventory"
+
+  # Think time (seconds) between Signin and the Inventory flow starting.
+  think_time_min: 2
+  think_time_max: 5
+
+  # Think time (seconds) after each Inventory batch, simulating the user
+  # pausing/switching tabs between summary widget groups loading.
+  batch_think_time_min: 1
+  batch_think_time_max: 3
+
