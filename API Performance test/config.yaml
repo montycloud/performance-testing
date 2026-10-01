@@ -182,7 +182,10 @@ inventory:
 
   # Path to the users CSV file (relative to this config file, or absolute).
   users_csv: "./users.csv"
-  user_count: 1
+  # How many rows to load from users_csv (first N). Must be >= the --users
+  # value passed to Locust, otherwise credentials get recycled round-robin
+  # and multiple virtual users end up signed in as the same account.
+  user_count: 4
 
   # Default spawn rate/run time (informational; override via Locust CLI flags).
   spawn_rate: 10
@@ -197,7 +200,7 @@ inventory:
     Inventory API Performance Test
     Standalone flow: Signin -> Inventory Summary (by-account + by-region +
     by-resourcetype, parallel).
-    User count: 1 
+    User count: 4 
 
   # Name used in the custom report filename: custom_<report_name>_<timestamp>.html
   report_name: "inventory"
