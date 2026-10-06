@@ -12,6 +12,7 @@ stays in charge of its own config file and module-level constants.
 """
 
 import csv
+import os
 import re
 import threading
 from pathlib import Path
@@ -70,6 +71,40 @@ class UserClaimer:
             idx = self._index % len(self._users)
             self._index += 1
         return self._users[idx]
+
+
+def load_env_credentials(prefix: str, logger) -> List[Dict[str, str]]:
+    """Scan os.environ for numbered {prefix}_ACCESS_KEY_<N> / {prefix}_SECRET_KEY_<N> pairs.
+
+    Used by tests (e.g. Day2SDK) that authenticate with static API key/secret
+    pairs per user rather than the Email/Password users CSV. Keeping these in
+    .env (not a CSV) avoids accidentally committing secrets to the repo.
+    """
+    pattern = re.compile(rf"^{re.escape(prefix)}_ACCESS_KEY_(\d+)$")
+    indices = set()
+    for key in os.environ:
+        match = pattern.match(key)
+        if match:
+            indices.add(int(match.group(1)))
+
+    creds: List[Dict[str, str]] = []
+    for idx in sorted(indices):
+        access_key = os.environ.get(f"{prefix}_ACCESS_KEY_{idx}", "").strip()
+        secret_key = os.environ.get(f"{prefix}_SECRET_KEY_{idx}", "").strip()
+        if not access_key or not secret_key:
+            logger.warning(
+                "Skipping %s credential #%d: missing AccessKey or SecretKey.", prefix, idx,
+            )
+            continue
+        creds.append({"AccessKey": access_key, "SecretKey": secret_key})
+
+    if not creds:
+        raise ValueError(
+            f"No {prefix} credentials found in environment. Set "
+            f"{prefix}_ACCESS_KEY_1 / {prefix}_SECRET_KEY_1 (and _2, _3, ...) in .env."
+        )
+    logger.info("Loaded %d %s credential pair(s) from environment.", len(creds), prefix)
+    return creds
 
 
 # ---------------------------------------------------------------------------
@@ -176,6 +211,43 @@ def signin(
     else:
         logger.info("[%s] OrganizationId = %s", email, org_id)
     return token, org_id
+
+
+def raw_header_get(
+    client,
+    headers: Dict[str, str],
+    path: str,
+    name: str,
+    timeout: int,
+    logger,
+    params: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Issue a GET using caller-supplied raw headers (no Bearer-token assumption).
+
+    Mirrors authenticated_get() but lets the caller fully control headers —
+    used by APIs (like Day2SDK) that authenticate via static x-api-key/
+    authorization headers rather than a signed-in session token.
+    """
+    body: Dict[str, Any] = {}
+    with client.get(
+        path,
+        headers=headers,
+        params=params,
+        name=name,
+        catch_response=True,
+        timeout=timeout,
+    ) as resp:
+        if resp.status_code >= 400:
+            resp.failure(f"HTTP {resp.status_code}")
+            logger.warning("FAIL  %-60s  →  HTTP %d", name, resp.status_code)
+        else:
+            try:
+                body = resp.json() or {}
+                resp.success()
+            except Exception:
+                resp.failure("Response is not valid JSON")
+                body = {}
+    return body
 
 
 def authenticated_get(

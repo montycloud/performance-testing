@@ -268,6 +268,7 @@ def _throughput_section_html(
     chat_rows: List[Dict],
     cost_rows: List[Dict],
     inventory_rows: List[Dict],
+    day2sdk_rows: List[Dict],
     duration_s: Optional[float],
 ) -> str:
     """Render the per-section throughput breakdown table."""
@@ -290,6 +291,7 @@ def _throughput_section_html(
         ("Chat",           "dot-chat",   chat_rows),
         ("Cost Dashboard", "dot-cost",   cost_rows),
         ("Inventory",      "dot-inventory", inventory_rows),
+        ("Day2SDK",        "dot-day2sdk", day2sdk_rows),
     ]
     tbody = ""
     for label, cls, rows in sections:
@@ -305,7 +307,8 @@ def _throughput_section_html(
         )
     # Totals
     t, f, s, fp, rps, srps, avg = _stats(
-        auth_rows + home_rows + wafr_rows + health_rows + chat_rows + cost_rows + inventory_rows
+        auth_rows + home_rows + wafr_rows + health_rows + chat_rows + cost_rows
+        + inventory_rows + day2sdk_rows
     )
     fcls = ' class="fail"' if f > 0 else ""
     tbody += (
@@ -461,6 +464,7 @@ section { margin-bottom: 48px; }
 .section-title.chat    { border-left-color: #db2777; background: #fdf2f8; }
 .section-title.cost    { border-left-color: #16a34a; background: #f0fdf4; }
 .section-title.inventory { border-left-color: #d97706; background: #fffbeb; }
+.section-title.day2sdk { border-left-color: #4338ca; background: #eef2ff; }
 .badge { font-size: .72rem; background: rgba(0,0,0,.12);
          border-radius: 12px; padding: 2px 9px; font-weight: 600; }
 
@@ -499,6 +503,7 @@ footer { text-align: center; color: #aaa; font-size: .75rem; padding: 28px; }
 .dot-chat   { color: #db2777; font-size: 1.1em; }
 .dot-cost   { color: #16a34a; font-size: 1.1em; }
 .dot-inventory { color: #d97706; font-size: 1.1em; }
+.dot-day2sdk { color: #4338ca; font-size: 1.1em; }
 .dot-total  { color: #0891b2; font-size: 1.1em; }
 
 /* Critical issues section */
@@ -583,12 +588,16 @@ def _full_html(
     chat_rows: List[Dict],
     cost_rows: List[Dict],
     inventory_rows: List[Dict],
+    day2sdk_rows: List[Dict],
     aggregated_row: Optional[Dict],
     description: str = "",
     config_data: Optional[Dict] = None,
     session_timeout_stats: Optional[Dict] = None,
 ) -> str:
-    all_rows = auth_rows + home_rows + wafr_rows + health_rows + chat_rows + cost_rows + inventory_rows
+    all_rows = (
+        auth_rows + home_rows + wafr_rows + health_rows + chat_rows + cost_rows
+        + inventory_rows + day2sdk_rows
+    )
     overall = _summary_totals(all_rows)
     hp_sum  = _summary_totals(home_rows)
     wafr_sum = _summary_totals(wafr_rows)
@@ -597,6 +606,7 @@ def _full_html(
     chat_sum = _summary_totals(chat_rows)
     cost_sum = _summary_totals(cost_rows)
     inventory_sum = _summary_totals(inventory_rows)
+    day2sdk_sum = _summary_totals(day2sdk_rows)
 
     duration_s = _duration_from_aggregated(aggregated_row)
 
@@ -629,6 +639,7 @@ def _full_html(
         _card("Chat",                  chat_sum["reqs"], f"avg {chat_sum['avg_rt']} · {chat_sum['fail_pct']} fail"),
         _card("Cost Dashboard",        cost_sum["reqs"], f"avg {cost_sum['avg_rt']} · {cost_sum['fail_pct']} fail"),
         _card("Inventory",             inventory_sum["reqs"], f"avg {inventory_sum['avg_rt']} · {inventory_sum['fail_pct']} fail"),
+        _card("Day2SDK",               day2sdk_sum["reqs"], f"avg {day2sdk_sum['avg_rt']} · {day2sdk_sum['fail_pct']} fail"),
         _card("Session Continuations", str(_st_total),   _st_sub),
     ])
 
@@ -667,7 +678,7 @@ def _full_html(
 </header>
 <main>
     <div class="cards">{cards_html}</div>
-    {_throughput_section_html(auth_rows, home_rows, wafr_rows, health_rows, chat_rows, cost_rows, inventory_rows, duration_s)}
+    {_throughput_section_html(auth_rows, home_rows, wafr_rows, health_rows, chat_rows, cost_rows, inventory_rows, day2sdk_rows, duration_s)}
   {_critical_failures_section_html(all_rows)}
   {_section("Authentication", "auth", auth_rows, "No [Auth] data found.")}
   {_section("Home Page", "",     home_rows, "No [HomePage] data found.")}
@@ -676,6 +687,7 @@ def _full_html(
   {_section("Chat", "chat", chat_rows, "No [Chat] data found.")}
   {_cost_section_html(cost_rows)}
   {_section("Inventory", "inventory", inventory_rows, "No [Inventory] data found.")}
+  {_section("Day2SDK", "day2sdk", day2sdk_rows, "No [Day2SDK] data found.")}
   {_session_timeout_section_html(session_timeout_stats or {})}
   {config_html}
 </main>
@@ -744,6 +756,7 @@ def generate(
     chat_rows: List[Dict] = []
     cost_rows: List[Dict] = []
     inventory_rows: List[Dict] = []
+    day2sdk_rows: List[Dict] = []
 
     for row in all_rows:
         name = row.get(_COL_NAME, "")
@@ -764,12 +777,14 @@ def generate(
             cost_rows.append(row)
         elif name.startswith("[Inventory]"):
             inventory_rows.append(row)
+        elif name.startswith("[Day2SDK]"):
+            day2sdk_rows.append(row)
         # rows with unknown prefixes are silently ignored
 
     generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     html = _full_html(
         generated_at, stats_csv, auth_rows, home_rows, wafr_rows, health_rows, chat_rows,
-        cost_rows, inventory_rows,
+        cost_rows, inventory_rows, day2sdk_rows,
         aggregated_row,
         description=description,
         config_data=config_data,

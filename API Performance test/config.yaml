@@ -214,3 +214,78 @@ inventory:
   batch_think_time_min: 1
   batch_think_time_max: 3
 
+# Day2SDK Tenant API flow — run via the SEPARATE day2sdk_api/day2sdk_locustfile.py
+# (its own HttpUser, its own on_test_start/on_test_stop hooks). GET-only, Tenant
+# section first pass. Does NOT use users.csv/the `test:` users_csv+user_count
+# fields — credentials are static AccessKey/SecretKey pairs read from .env
+# (DAY2SDK_ACCESS_KEY_<N> / DAY2SDK_SECRET_KEY_<N>, see .env.example) and
+# round-robin assigned per simulated user, same mechanism as users.csv rows.
+# Load profile below (run_mode/iterations/think times) is fully self-contained,
+# independent from the `test:` section's Home/WAFR journey settings.
+day2sdk_api:
+  enabled: true
+
+  # Base URL per environment. Select at runtime via `locust ... --env dev`
+  # or `--env stg` (defaults to default_env below when --env is omitted).
+  environments:
+    dev: "https://dev-api.montycloud.com"
+    stg: "https://stg1-api.montycloud.com"
+  default_env: "stg"
+
+  # Per-request timeout in seconds.
+  timeout_seconds: 40
+
+  # Run mode controls how long virtual users stay active:
+  #   single_journey  – each user completes `iterations` full journeys then
+  #                     stops. Use with --users N (no --run-time needed).
+  #   timed           – users loop continuously until --run-time expires.
+  #                     `iterations` is ignored in this mode.
+  run_mode: "single_journey"
+
+  # Journeys per user in single_journey mode (ignored in timed mode).
+  # Set to 1 for a true "single journey per user" run.
+  iterations: 1
+
+  # Think time (seconds) before each journey's calls start.
+  think_time_min: 1
+  think_time_max: 2
+
+  # Which API tags to exercise (see day2_api_endpoints.csv for the full
+  # catalog). Auth (GET /auth/user + /roles) is compulsory and always runs,
+  # no toggle needed. Only Tenant/Assessment are implemented so far — all
+  # other tags (Organization, Workload, User, Account, Azure*, Cost, Report,
+  # Resource, Bot, Security, Optimization, Health, Project, MAP Project) are
+  # deferred; Azure tags specifically are excluded by design, not just deferred.
+  tags:
+    tenant: true
+    # Assessment loops over every tenant captured by the Tenant tag's
+    # /tenants list call. If tenant: false but assessment: true, the minimal
+    # /tenants list call still runs (just not categories/getTenantById) so
+    # Assessment has tenant IDs to use.
+    assessment: True
+
+  # Tenant tag: PageSize query param for GET /tenants.
+  tenants_page_size: 10
+
+  # Assessment tag: Status query param for GET /tenants/{TenantId}/assessments
+  # (required by the API). One of e.g. PENDING, COMPLETED.
+  assessment_status: "PENDING"
+
+  # Default spawn rate/run time (informational; override via Locust CLI flags).
+  spawn_rate: 10
+  run_time: "5m"
+
+  # Name used in the custom report filename: custom_<report_name>_<timestamp>.html
+  report_name: "day2sdk_api_user_1"
+
+  # Human-readable description shown at the top of the HTML report.
+  description: |
+    Day2SDK API GET performance test (tag-based journey, all sequential)
+    Auth (always): GET /auth/user, /roles
+    Tenant (tags.tenant): GET /tenants, /tenants/categories, /tenants/{TenantId}
+    Assessment (tags.assessment): per tenant — GET assessments list, then
+      assessment detail/findings/top-checks/top-resources/summary/schedules
+      for the first assessment found.
+    Auth: static AccessKey/SecretKey pairs from .env (DAY2SDK_ACCESS_KEY_N /
+    DAY2SDK_SECRET_KEY_N). users.csv is NOT used for this test.
+
