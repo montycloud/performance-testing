@@ -227,6 +227,11 @@ def raw_header_get(
     Mirrors authenticated_get() but lets the caller fully control headers —
     used by APIs (like Day2SDK) that authenticate via static x-api-key/
     authorization headers rather than a signed-in session token.
+
+    On failure (HTTP >=400 or non-JSON body), logs the full URL, query params
+    and a response body snippet at WARNING level so failures are debuggable
+    from the log file, not just the Locust stats CSV (which has no room for
+    this detail). Secret header values are redacted before logging.
     """
     body: Dict[str, Any] = {}
     with client.get(
@@ -239,15 +244,53 @@ def raw_header_get(
     ) as resp:
         if resp.status_code >= 400:
             resp.failure(f"HTTP {resp.status_code}")
-            logger.warning("FAIL  %-60s  →  HTTP %d", name, resp.status_code)
+            logger.warning(
+                "FAIL  %-60s  →  HTTP %d\n"
+                "    URL:      %s\n"
+                "    Params:   %s\n"
+                "    Headers:  %s\n"
+                "    Response: %s",
+                name, resp.status_code, resp.url, params or {},
+                _redact_headers(headers), resp.text[:1000],
+            )
         else:
             try:
                 body = resp.json() or {}
                 resp.success()
-            except Exception:
-                resp.failure("Response is not valid JSON")
+            except Exception as exc:
+                resp.failure(str(exc))
+                if not resp.status_code:
+                    # No real HTTP response at all — e.g. connection reset/timeout
+                    # before any status code came back. `path` here already has
+                    # real IDs substituted (unlike `name`, which is a template).
+                    logger.warning(
+                        "FAIL  %-60s  →  No HTTP response (connection/timeout "
+                        "error) — %s\n"
+                        "    Path:   %s\n"
+                        "    Params: %s",
+                        name, exc, path, params or {},
+                    )
+                else:
+                    logger.warning(
+                        "FAIL  %-60s  →  Response is not valid JSON (HTTP %d)\n"
+                        "    URL:      %s\n"
+                        "    Params:   %s\n"
+                        "    Response: %s",
+                        name, resp.status_code, resp.url, params or {}, resp.text[:1000],
+                    )
                 body = {}
     return body
+
+
+def _redact_headers(headers: Dict[str, str]) -> Dict[str, str]:
+    """Shorten secret-bearing header values before they reach a log line."""
+    redacted = {}
+    for key, value in headers.items():
+        if key.lower() in ("authorization", "x-api-key") and value:
+            redacted[key] = f"{value[:4]}...<redacted>"
+        else:
+            redacted[key] = value
+    return redacted
 
 
 def authenticated_get(

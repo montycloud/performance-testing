@@ -252,17 +252,28 @@ day2sdk_api:
 
   # Which API tags to exercise (see day2_api_endpoints.csv for the full
   # catalog). Auth (GET /auth/user + /roles) is compulsory and always runs,
-  # no toggle needed. Only Tenant/Assessment are implemented so far — all
-  # other tags (Organization, Workload, User, Account, Azure*, Cost, Report,
-  # Resource, Bot, Security, Optimization, Health, Project, MAP Project) are
-  # deferred; Azure tags specifically are excluded by design, not just deferred.
+  # no toggle needed. GET /tenants runs ONCE (sequential, shared by every
+  # tenant-scoped tag below — no duplicate /tenants calls). Each enabled tag
+  # then runs its own fully sequential chain of calls; different tags run in
+  # PARALLEL with each other (gevent greenlets).
+  # Deferred tags (not implemented yet): Workload, Security, Report, Cost,
+  # Optimization, Bot, MAP Project. Azure tags are excluded by design.
   tags:
     tenant: true
-    # Assessment loops over every tenant captured by the Tenant tag's
-    # /tenants list call. If tenant: false but assessment: true, the minimal
-    # /tenants list call still runs (just not categories/getTenantById) so
-    # Assessment has tenant IDs to use.
+    # Assessment loops over every tenant from the shared tenant_ids list.
     assessment: True
+    # Below: simple TenantId-only tags, no sub-ID drill-down. Each loops over
+    # the same shared tenant_ids list, same as Assessment.
+    user: True
+    account: True
+    resource: false
+    health: True
+    project: True 
+    security: false
+    # Organization uses a separate ID space (OrganizationId, not TenantId).
+    # This phase only captures OrganizationId(s) via listOrganizations —
+    # reserved for the Workload tag to be added later.
+    organization: True
 
   # Tenant tag: PageSize query param for GET /tenants.
   tenants_page_size: 10
@@ -270,6 +281,11 @@ day2sdk_api:
   # Assessment tag: Status query param for GET /tenants/{TenantId}/assessments
   # (required by the API). One of e.g. PENDING, COMPLETED.
   assessment_status: "PENDING"
+
+  # Organization tag: PageNumber/PageSize query params for GET /organizations
+  # (both required by the API).
+  organizations_page_number: 1
+  organizations_page_size: 10
 
   # Default spawn rate/run time (informational; override via Locust CLI flags).
   spawn_rate: 10
@@ -280,12 +296,25 @@ day2sdk_api:
 
   # Human-readable description shown at the top of the HTML report.
   description: |
-    Day2SDK API GET performance test (tag-based journey, all sequential)
-    Auth (always): GET /auth/user, /roles
-    Tenant (tags.tenant): GET /tenants, /tenants/categories, /tenants/{TenantId}
-    Assessment (tags.assessment): per tenant — GET assessments list, then
-      assessment detail/findings/top-checks/top-resources/summary/schedules
-      for the first assessment found.
+    Day2SDK API GET performance test (tag-based journey)
+    Auth (always, sequential first): GET /auth/user, /roles
+    Then every enabled tag below runs in PARALLEL (each internally sequential):
+      Tenant: GET /tenants, /tenants/categories, /tenants/{TenantId}
+      Assessment: per tenant — assessments list + detail/findings/top-checks/
+        top-resources/summary/schedules for the first assessment found
+      User: per tenant — GET /tenants/{TenantId}/users
+      Account: per tenant — GET accounts list (CloudProvider=AWS) +
+        accounts/count + region-status for one randomly-picked account
+      Resource: per tenant — GET resources/regions, resource-types, resources,
+        inventory-summary (CloudProvider=AWS, SummaryType=By-Account)
+      Health: per tenant — GET health/events/summary, health/policies,
+        health/events/breakdown-summary (Dimension=EventTypeCode)
+      Project: per tenant — GET projects, projects/requests
+      Security: per tenant — GET posture/summary (ReportType=SHIP,
+        Dimension=TENANT_SUMMARY), services list, first service's summary,
+        checks/summary, top-entities (Dimension=SERVICES)
+      Organization: GET /organizations (captures OrganizationId for a future
+        Workload tag; independent of Tenant)
     Auth: static AccessKey/SecretKey pairs from .env (DAY2SDK_ACCESS_KEY_N /
     DAY2SDK_SECRET_KEY_N). users.csv is NOT used for this test.
 

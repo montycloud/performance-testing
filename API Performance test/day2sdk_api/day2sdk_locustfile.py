@@ -3,37 +3,51 @@
 Day2SDK Tenant API — Locust Performance Test
 =========================================================
 Standalone Locust scenario covering Day2SDK GET endpoints, grouped by the
-API's own tags (see day2_api_endpoints.csv) and run sequentially:
+API's own tags (see day2_api_endpoints.csv):
 
-  Auth tag (always runs — compulsory for every user):
+  Auth tag (always runs, sequential, first — compulsory for every user):
     GET /auth/user
     GET /roles
 
-  Tenant tag (config: day2sdk_api.tags.tenant):
-    GET /tenants?PageSize=<tenants_page_size>   -> capture Tenants[].ID list
-    GET /tenants/categories
-    GET /tenants/{TenantId}                     (once per captured tenant)
+  GET /tenants?PageSize=<tenants_page_size> runs ONCE next (sequential),
+  shared by every tenant-scoped tag below — no duplicate /tenants calls.
 
-  Assessment tag (config: day2sdk_api.tags.assessment):
-    For each tenant captured above:
+  Then every enabled tag below runs as a PARALLEL gevent greenlet (via
+  common.run_batch) — each tag's own calls are sequential internally, but
+  different tags overlap in time with each other:
+
+    Tenant (day2sdk_api.tags.tenant):
+      GET /tenants/categories
+      GET /tenants/{TenantId}                   (once per captured tenant)
+
+    Assessment (tags.assessment): per tenant —
       GET /tenants/{TenantId}/assessments?Status=<assessment_status>
                                                  -> capture first Assessment ID
-      GET /tenants/{TenantId}/assessments/{AssessmentId}
-      GET .../findings
-      GET .../resource-types
-      GET .../top-checks
-      GET .../top-resources
-      GET .../findings/summary
-      GET .../findings/summary-severity?Dimension=ResourceType
-      GET .../schedules
+      GET .../assessments/{AssessmentId}, findings, resource-types,
+          top-checks, top-resources, findings/summary,
+          findings/summary-severity, schedules
 
-    Assessment requires tenant IDs; if day2sdk_api.tags.tenant is false but
-    tags.assessment is true, the minimal /tenants list call still runs (just
-    not the categories/getTenantById calls) so Assessment has IDs to use.
+    User (tags.user): per tenant — GET /tenants/{TenantId}/users
 
-  Azure-tagged endpoints and all other CSV tags (Organization, Workload,
-  User, Account, Cost, Report, Resource, Bot, Security, Optimization,
-  Health, Project, MAP Project) are intentionally NOT implemented yet.
+    Account (tags.account): per tenant —
+      GET /tenants/{TenantId}/accounts, /accounts/count
+
+    Resource (tags.resource): per tenant —
+      GET /tenants/{TenantId}resource-types, resources
+
+    Health (tags.health): per tenant —
+      GET /tenants/{TenantId}/health/events/summary, health/policies
+
+    Project (tags.project): per tenant —
+      GET /tenants/{TenantId}/projects, projects/requests
+
+    Organization (tags.organization): independent of Tenant (separate
+    OrganizationId space) — GET /organizations?PageNumber=&PageSize=
+    captures OrganizationId(s), reserved for a future Workload tag.
+
+  Deferred (not implemented yet): Workload, Security, Report, Cost,
+  Optimization, Bot, MAP Project. Azure-tagged endpoints are excluded by
+  design, not just deferred.
 
 Authentication is NOT the Email/Password users.csv flow used by the other
 locustfiles in this project — Day2SDK uses static per-user AccessKey/
@@ -85,6 +99,15 @@ _ROOT = _HERE.parent  # "API Performance test" — config.yaml/.env/common.py li
 _CONFIG_FILE = _ROOT / "config.yaml"
 _ENV_FILE = _ROOT / ".env"
 
+# Every FAIL/error logged via `logger` (incl. the detailed failure dumps from
+# common.raw_header_get) also lands here, for debugging after a headless run.
+_FAILURES_LOG = _ROOT / "reports" / "day2sdk_failures.log"
+_FAILURES_LOG.parent.mkdir(parents=True, exist_ok=True)
+_failures_handler = logging.FileHandler(_FAILURES_LOG, mode="a", encoding="utf-8")
+_failures_handler.setLevel(logging.WARNING)
+_failures_handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s"))
+logger.addHandler(_failures_handler)
+
 load_dotenv(dotenv_path=_ENV_FILE, override=False)
 
 if str(_ROOT) not in sys.path:
@@ -129,10 +152,17 @@ _THINK_MIN: float = float(_day2sdk_cfg.get("think_time_min", 1))
 _THINK_MAX: float = float(_day2sdk_cfg.get("think_time_max", 2))
 
 # Which API tags to exercise. Auth is compulsory and always runs — it has no
-# toggle. Tenant defaults on; Assessment defaults off (enable in config.yaml).
+# toggle. Tenant defaults on; everything else defaults off (enable in config).
 _tags_cfg: Dict[str, Any] = _day2sdk_cfg.get("tags", {}) or {}
 _TAG_TENANT_ENABLED: bool = bool(_tags_cfg.get("tenant", True))
 _TAG_ASSESSMENT_ENABLED: bool = bool(_tags_cfg.get("assessment", False))
+_TAG_USER_ENABLED: bool = bool(_tags_cfg.get("user", False))
+_TAG_ACCOUNT_ENABLED: bool = bool(_tags_cfg.get("account", False))
+_TAG_RESOURCE_ENABLED: bool = bool(_tags_cfg.get("resource", False))
+_TAG_HEALTH_ENABLED: bool = bool(_tags_cfg.get("health", False))
+_TAG_PROJECT_ENABLED: bool = bool(_tags_cfg.get("project", False))
+_TAG_ORGANIZATION_ENABLED: bool = bool(_tags_cfg.get("organization", False))
+_TAG_SECURITY_ENABLED: bool = bool(_tags_cfg.get("security", False))
 
 # Tenant tag: page size for the /tenants list call.
 _TENANTS_PAGE_SIZE: int = int(_day2sdk_cfg.get("tenants_page_size", 10))
@@ -140,11 +170,15 @@ _TENANTS_PAGE_SIZE: int = int(_day2sdk_cfg.get("tenants_page_size", 10))
 # Assessment tag: Status query param for listAssessments (required by the API).
 _ASSESSMENT_STATUS: str = str(_day2sdk_cfg.get("assessment_status", "PENDING"))
 
+# Organization tag: PageNumber/PageSize query params (both required by the API).
+_ORG_PAGE_NUMBER: int = int(_day2sdk_cfg.get("organizations_page_number", 1))
+_ORG_PAGE_SIZE: int = int(_day2sdk_cfg.get("organizations_page_size", 10))
+
 # Static AccessKey/SecretKey pairs from .env — ignores users.csv entirely.
 _CREDENTIALS: List[Dict[str, str]] = common.load_env_credentials("DAY2SDK", logger)
 _cred_claimer = common.UserClaimer(_CREDENTIALS)
 
-_API_PREFIX = "/day2-ecs/api/v1"
+_API_PREFIX = "/day2/api/v1"
 
 
 # ---------------------------------------------------------------------------
@@ -162,6 +196,15 @@ def _add_custom_args(parser) -> None:
         help=(
             f"Day2SDK environment to target ({'/'.join(sorted(_ENVIRONMENTS))}). "
             f"Defaults to day2sdk_api.default_env in config.yaml ({_DEFAULT_ENV})."
+        ),
+    )
+    parser.add_argument(
+        "--report-name",
+        type=str,
+        default=None,
+        help=(
+            "Custom HTML report name segment (custom_<name>_<timestamp>.html). "
+            "Defaults to day2sdk_api.report_name in config.yaml when omitted."
         ),
     )
 
@@ -232,28 +275,51 @@ class Day2SDKUser(HttpUser):
             )
 
     # ------------------------------------------------------------------
-    # Day2SDK flow — tag-based, fully sequential per the PRD
+    # Day2SDK flow — Auth, then TenantId fetch (both sequential, once),
+    # then enabled tags run in PARALLEL sharing that same tenant_ids list.
     # ------------------------------------------------------------------
 
     def _day2sdk_flow(self) -> None:
         self._auth_flow()
 
-        tenant_ids: List[str] = []
-        if _TAG_TENANT_ENABLED or _TAG_ASSESSMENT_ENABLED:
-            tenant_ids = self._tenant_flow(run_full=_TAG_TENANT_ENABLED)
+        tenant_tags_enabled = (
+            _TAG_TENANT_ENABLED or _TAG_ASSESSMENT_ENABLED or _TAG_USER_ENABLED
+            or _TAG_ACCOUNT_ENABLED or _TAG_RESOURCE_ENABLED or _TAG_HEALTH_ENABLED
+            or _TAG_PROJECT_ENABLED or _TAG_SECURITY_ENABLED
+        )
+        tenant_ids: List[str] = self._fetch_tenant_ids() if tenant_tags_enabled else []
 
+        branches = []
+        if _TAG_TENANT_ENABLED:
+            branches.append(lambda: self._tenant_flow(tenant_ids))
         if _TAG_ASSESSMENT_ENABLED:
-            self._assessment_flow(tenant_ids)
+            branches.append(lambda: self._assessment_flow(tenant_ids))
+        if _TAG_USER_ENABLED:
+            branches.append(lambda: self._user_flow(tenant_ids))
+        if _TAG_ACCOUNT_ENABLED:
+            branches.append(lambda: self._account_flow(tenant_ids))
+        if _TAG_RESOURCE_ENABLED:
+            branches.append(lambda: self._resource_flow(tenant_ids))
+        if _TAG_HEALTH_ENABLED:
+            branches.append(lambda: self._health_flow(tenant_ids))
+        if _TAG_PROJECT_ENABLED:
+            branches.append(lambda: self._project_flow(tenant_ids))
+        if _TAG_SECURITY_ENABLED:
+            branches.append(lambda: self._security_flow(tenant_ids))
+        if _TAG_ORGANIZATION_ENABLED:
+            branches.append(self._organization_flow)
+
+        if branches:
+            common.run_batch(branches)
 
     def _auth_flow(self) -> None:
         """Auth tag — compulsory for every user, always runs regardless of config."""
         self._get(f"{_API_PREFIX}/auth/user", "[Day2SDK] /auth/user")
         self._get(f"{_API_PREFIX}/roles", "[Day2SDK] /roles")
 
-    def _tenant_flow(self, run_full: bool) -> List[str]:
-        """Tenant tag. Always fetches the tenant list (Assessment depends on the
-        IDs); categories + per-tenant getTenantById only run when the Tenant
-        tag itself is enabled (run_full=True).
+    def _fetch_tenant_ids(self) -> List[str]:
+        """Fetch the tenant list ONCE, shared by every tenant-scoped tag that
+        runs afterward (read-only list, safe to share across greenlets).
         """
         body = self._get(
             f"{_API_PREFIX}/tenants", "[Day2SDK] /tenants",
@@ -265,19 +331,20 @@ class Day2SDKUser(HttpUser):
                 "[%s] /tenants returned no tenants — downstream tenant-scoped "
                 "calls will be skipped.", self._creds["AccessKey"],
             )
-            return tenant_ids
+        return tenant_ids
 
-        if not run_full:
-            return tenant_ids
-
+    def _tenant_flow(self, tenant_ids: List[str]) -> None:
+        """Tenant tag — categories, then getTenantById per tenant (list already
+        fetched once in _day2sdk_flow)."""
+        if not tenant_ids:
+            return
         self._get(f"{_API_PREFIX}/tenants/categories", "[Day2SDK] /tenants/categories")
         for tenant_id in tenant_ids:
             self._get(f"{_API_PREFIX}/tenants/{tenant_id}", "[Day2SDK] /tenants/{TenantId}")
-        return tenant_ids
 
     def _assessment_flow(self, tenant_ids: List[str]) -> None:
         """Assessment tag — for each tenant, list assessments then drill into
-        the first assessment's GET detail endpoints. All sequential.
+        the first assessment's GET detail endpoints. Sequential per tenant.
         """
         if not tenant_ids:
             logger.warning(
@@ -322,6 +389,133 @@ class Day2SDKUser(HttpUser):
                 params={"Dimension": "ResourceType"},
             )
             self._get(f"{base}/schedules", "[Day2SDK] .../assessments/{AssessmentId}/schedules")
+
+    def _user_flow(self, tenant_ids: List[str]) -> None:
+        """User tag — per tenant, list users."""
+        for tenant_id in tenant_ids:
+            self._get(f"{_API_PREFIX}/tenants/{tenant_id}/users", "[Day2SDK] /tenants/{TenantId}/users")
+
+    def _account_flow(self, tenant_ids: List[str]) -> None:
+        """Account tag — per tenant: accounts list (capture AccountId list),
+        accounts count, then region-status for one randomly-picked account.
+        """
+        for tenant_id in tenant_ids:
+            body = self._get(
+                f"{_API_PREFIX}/tenants/{tenant_id}/accounts", "[Day2SDK] /tenants/{TenantId}/accounts",
+                params={"CloudProvider": "AWS", "PageSize": 10, "PageNumber": 1},
+            )
+            self._get(f"{_API_PREFIX}/tenants/{tenant_id}/accounts/count", "[Day2SDK] /tenants/{TenantId}/accounts/count")
+
+            account_ids = [a["AccountId"] for a in body.get("Accounts", []) or [] if a.get("AccountId")]
+            if not account_ids:
+                logger.info(
+                    "[%s] tenant %s has no accounts — skipping region-status.",
+                    self._creds["AccessKey"], tenant_id,
+                )
+                continue
+            account_id = random.choice(account_ids)
+            self._get(
+                f"{_API_PREFIX}/tenants/{tenant_id}/accounts/{account_id}/region-status",
+                "[Day2SDK] /tenants/{TenantId}/accounts/{AccountId}/region-status",
+            )
+
+    def _resource_flow(self, tenant_ids: List[str]) -> None:
+        """Resource tag — per tenant, regions/resource-types/resources/inventory-summary."""
+        for tenant_id in tenant_ids:
+            self._get(f"{_API_PREFIX}/tenants/{tenant_id}/resources/regions", "[Day2SDK] /tenants/{TenantId}/resources/regions")
+            self._get(f"{_API_PREFIX}/tenants/{tenant_id}/resources/resource-types", "[Day2SDK] /tenants/{TenantId}/resources/resource-types")
+            self._get(f"{_API_PREFIX}/tenants/{tenant_id}/resources", "[Day2SDK] /tenants/{TenantId}/resources")
+            self._get(
+                f"{_API_PREFIX}/tenants/{tenant_id}/resources/inventory-summary",
+                "[Day2SDK] /tenants/{TenantId}/resources/inventory-summary",
+                params={"CloudProvider": "AWS", "SummaryType": "By-Account"},
+            )
+
+    def _health_flow(self, tenant_ids: List[str]) -> None:
+        """Health tag — per tenant, events summary + policies + breakdown-summary."""
+        for tenant_id in tenant_ids:
+            self._get(f"{_API_PREFIX}/tenants/{tenant_id}/health/events/summary", "[Day2SDK] /tenants/{TenantId}/health/events/summary")
+            self._get(f"{_API_PREFIX}/tenants/{tenant_id}/health/policies", "[Day2SDK] /tenants/{TenantId}/health/policies")
+            self._get(
+                f"{_API_PREFIX}/tenants/{tenant_id}/health/events/breakdown-summary",
+                "[Day2SDK] /tenants/{TenantId}/health/events/breakdown-summary",
+                params={"Dimension": "EventTypeCode", "PageSize": 10, "PageNumber": 1},
+            )
+
+    def _project_flow(self, tenant_ids: List[str]) -> None:
+        """Project tag — per tenant, projects list + project requests."""
+        for tenant_id in tenant_ids:
+            self._get(f"{_API_PREFIX}/tenants/{tenant_id}/projects", "[Day2SDK] /tenants/{TenantId}/projects")
+            self._get(f"{_API_PREFIX}/tenants/{tenant_id}/projects/requests", "[Day2SDK] /tenants/{TenantId}/projects/requests")
+
+    def _security_flow(self, tenant_ids: List[str]) -> None:
+        """Security tag — per tenant: posture summary (hardcoded Dimension),
+        services list (capture first ServiceId), that service's summary,
+        checks summary, and top-entities (hardcoded Dimension=SERVICES).
+        ReportType=SHIP is fixed — it's the only value this API accepts today.
+        """
+        for tenant_id in tenant_ids:
+            base = f"{_API_PREFIX}/tenants/{tenant_id}/security"
+            self._get(
+                f"{base}/posture/summary", "[Day2SDK] /tenants/{TenantId}/security/posture/summary",
+                params={"ReportType": "SHIP", "Dimension": "TENANT_SUMMARY"},
+            )
+            body = self._get(
+                f"{base}/services", "[Day2SDK] /tenants/{TenantId}/security/services",
+                params={"ReportType": "SHIP", "PageNumber": 1, "PageSize": 10},
+            )
+            self._get(
+                f"{base}/checks/summary", "[Day2SDK] /tenants/{TenantId}/security/checks/summary",
+                params={"ReportType": "SHIP", "PageNumber": 1, "PageSize": 10},
+            )
+            self._get(
+                f"{base}/top-entities", "[Day2SDK] /tenants/{TenantId}/security/top-entities",
+                params={"ReportType": "SHIP", "Dimension": "SERVICES"},
+            )
+
+            services = body.get("Services") or body.get("Items") or []
+            if not services:
+                logger.info(
+                    "[%s] tenant %s has no security services — skipping service summary.",
+                    self._creds["AccessKey"], tenant_id,
+                )
+                continue
+            service_id = services[0].get("ServiceId")
+            if not service_id:
+                logger.warning(
+                    "[%s] tenant %s: first security service has no ServiceId field "
+                    "(keys: %s) — skipping service summary.",
+                    self._creds["AccessKey"], tenant_id, sorted(services[0].keys()),
+                )
+                continue
+            self._get(
+                f"{base}/services/{service_id}/summary",
+                "[Day2SDK] /tenants/{TenantId}/security/services/{ServiceId}/summary",
+                params={"ReportType": "SHIP"},
+            )
+
+    def _organization_flow(self) -> None:
+        """Organization tag — independent of Tenant (separate OrganizationId
+        space). Captures OrganizationId(s), reserved for a future Workload tag.
+        """
+        body = self._get(
+            f"{_API_PREFIX}/organizations", "[Day2SDK] /organizations",
+            params={"PageNumber": _ORG_PAGE_NUMBER, "PageSize": _ORG_PAGE_SIZE},
+        )
+        orgs = body.get("Organizations") or body.get("Items") or []
+        org_ids = [o["ID"] for o in orgs if o.get("ID")]
+        if not org_ids:
+            logger.warning(
+                "[%s] /organizations returned no organizations (or response "
+                "shape is unexpected, keys: %s).",
+                self._creds["AccessKey"], sorted(body.keys()) if body else [],
+            )
+        else:
+            logger.info(
+                "[%s] Organization tag: captured %d organization ID(s) "
+                "(reserved for a future Workload tag).",
+                self._creds["AccessKey"], len(org_ids),
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -395,13 +589,16 @@ def on_test_stop(environment, **kwargs) -> None:
     if str(_ROOT) not in sys.path:
         sys.path.insert(0, str(_ROOT))
 
+    opts = getattr(environment, "parsed_options", None)
+    report_name = (getattr(opts, "report_name", None) or _day2sdk_cfg.get("report_name", ""))
+
     try:
         import report_generator as rg  # noqa: PLC0415
         out = rg.generate(
             stats_csv,
             description=_day2sdk_cfg.get("description", ""),
             config_data=CFG,
-            report_name=_day2sdk_cfg.get("report_name", ""),
+            report_name=report_name,
         )
         logger.info("Custom HTML report  →  %s", out)
     except Exception as exc:
