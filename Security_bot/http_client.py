@@ -43,18 +43,21 @@ class StepResponse:
         return 200 <= self.status_code < 300 and self.error is None
 
     def to_record(self) -> Dict[str, Any]:
+        masked_body = self.body
+        if isinstance(masked_body, dict):
+            masked_body = mask(masked_body)
         return {
             "request": {
                 "method": self.method,
                 "url": self.url,
-                "params": self.request_params,
-                "payload": self.request_payload,
-                "cookies": self.request_cookies,
+                "params": mask(self.request_params) if self.request_params else self.request_params,
+                "payload": mask(self.request_payload) if self.request_payload else self.request_payload,
+                "cookies": mask(self.request_cookies) if self.request_cookies else self.request_cookies,
             },
             "status_code": self.status_code,
             "elapsed_ms": round(self.elapsed_ms, 1),
             "error": self.error,
-            "response": self.body if self.body is not None else self.text[:4000],
+            "response": masked_body if masked_body is not None else self.text[:4000],
         }
 
 
