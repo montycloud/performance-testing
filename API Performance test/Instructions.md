@@ -31,6 +31,10 @@ python3 -m locust -f locustfile.py --headless --users N --spawn-rate R \
 | `Tenant.json` | User-provided list of `{ID, Name, ...}` tenant entries; **all** entries are sent in every chat call's `tenant_scope` (built once at module load, not per-user). |
 | `executions.yaml` | Manifest for `run_chat_executions.py` — a list of `{name, queries_file, description}` runs sharing one `users`/`spawn_rate`/`run_time` block. |
 | `run_chat_executions.py` | Standalone sweep runner — see "Chat-query sweep runner" section below. Does **not** modify `locustfile.py`/`report_generator.py`. |
+| `common.py` | Shared signin/config-load/users-CSV/authenticated-GET/`run_batch` helpers, extracted so standalone flow files (below) don't duplicate `locustfile.py`'s inline versions. Every function takes its inputs as parameters — it never reads a config file directly. |
+| `cost_dashboard_locustfile.py` + `cost_dashboard_config.yaml` | Separate standalone Locust scenario for the Cost Dashboard page. Own config file, own `HttpUser` subclass, imports `common.py`. Does not touch `locustfile.py`/`config.yaml`. |
+| `inventory_locustfile.py` | Separate standalone Locust scenario for the Inventory summary page (`GET /org/inventory-summary`). Reads the SAME `config.yaml` as `locustfile.py`, but only its own `inventory:` section (self-contained: own `users_csv`/`iterations`/think times, does not read the top-level `test:` block). See "Standalone flow files" section below. |
+| `run_users_sweep.py` | Generic pipeline runner: re-runs any `--locustfile` headless once per user-count in 1..N (or an explicit `--users` list), each with its own `--csv`/`--html`, non-zero exit if any run failed. Used for the Inventory/Cost Dashboard "ramp test" use case — no per-flow script needed. |
 
 ## The five flows (all in `MontyCloudUser`)
 
@@ -80,8 +84,13 @@ warning) — see the precedence check near the module-level config bootstrap.
 
 ## Adding a new optional flow (pattern to follow)
 
-This is exactly how the Chat flow was added — reuse this pattern for the next
-one:
+There are now **two** patterns in this codebase — pick based on whether the
+new flow should ever share a journey with Home/WAFR/Health/Chat:
+
+### Pattern A — config-toggle inside `locustfile.py` (Health/Chat)
+
+Use this when the new flow might run *appended* after Home/WAFR in the same
+user journey as existing flows.
 
 1. Add a new top-level section to `config.yaml` with at least `enabled` and
    `mode` (`appended`/`standalone`) keys, following `health:`/`chat:`.
@@ -98,6 +107,43 @@ one:
    `_throughput_section_html()`, and `_full_html()`'s section list — plus a
    `.dot-yourflow` / `.section-title.yourflow` CSS pair.
 6. Document the new config keys and flow behavior in `README.md`.
+
+### Pattern B — separate standalone locustfile (Cost Dashboard, Inventory)
+
+Use this when the new flow is always its own independent journey (Signin →
+think time → flow, nothing else) and you want it fully isolated from
+`locustfile.py`'s journey logic so it can't regress the main test.
+
+Two config sub-options exist here (both currently in use — pick per
+preference/blast-radius tolerance):
+- **Own config file** (Cost Dashboard's approach): `yourflow_config.yaml`
+  with its own `api:`/`test:`/`yourflow:` sections. Fully isolated, but
+  duplicates `api.base_url`/`timeout_seconds`/etc. across files.
+- **Section in the shared `config.yaml`** (Inventory's approach): add a
+  self-contained `yourflow:` section to `config.yaml` (its own
+  `users_csv`/`iterations`/`report_name`/think-times, NOT reusing the
+  top-level `test:` block since that's tailored to the main journey), and
+  point `yourflow_locustfile.py`'s `_CONFIG_FILE` at `config.yaml`. Reuses
+  the shared `api:` block; read-only access is safe even if the main
+  `locustfile.py` run is happening at the same time.
+
+1. Add config per one of the two sub-options above.
+2. Create `yourflow_locustfile.py`, copied structurally from
+   `inventory_locustfile.py`/`cost_dashboard_locustfile.py`: bootstrap via
+   `common.load_config`/`common.load_users`/`common.UserClaimer`, an
+   `HttpUser` subclass using `common.signin`/`common.authenticated_get`/
+   `common.run_batch`, a `_yourflow_flow()` method with `[YourFlow]`-prefixed
+   request names, and the same `on_test_start`/`on_test_stop` event hooks
+   (copy verbatim — they call `report_generator.generate(...)` the same way).
+3. Extend `report_generator.py` the same 8 spots as Pattern A step 5 (row
+   bucketing, `_full_html`/`_throughput_section_html` params, a `_card(...)`,
+   a `_section(...)` line, 2 CSS rules) — `_section()` already hides itself
+   when its row list is empty, so nothing else is needed to keep the report
+   clean when a flow didn't run.
+4. No changes to `run_users_sweep.py` — it already works with any
+   `--locustfile yourflow_locustfile.py --max-users N` for the pipeline ramp
+   use case.
+5. Document the new config keys, run command, and ramp command in `README.md`.
 
 ## Chat-query sweep runner (`run_chat_executions.py`)
 
