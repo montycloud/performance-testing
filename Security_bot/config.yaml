@@ -16,7 +16,7 @@ bot:
   rescan_path: "/bots/api/{bot_id}/rescan"
 
 run:
-  users: 8
+  users: 7
   users_csv: "users.csv"
   organizations_file: "organizations.json"
   exclude_root_org: false                   # orgs are assigned strictly unique, cap = pool size

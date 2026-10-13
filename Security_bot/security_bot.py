@@ -71,12 +71,18 @@ def run_user(ctx: UserContext, settings, pool, run_log: RunLogger, findings_limi
             rescan_barrier.wait()
         step_trigger_rescan(ctx, settings, run_log)
     except StepError as exc:
+        ctx.errors.append(str(exc))
         logger.error("%s aborted: %s", ctx.label, exc)
         if rescan_barrier:
             rescan_barrier.abort()
     except threading.BrokenBarrierError:
         ctx.errors.append("rescan synchronization cancelled because another user failed before step 6")
         logger.error("%s skipped rescan because the synchronization barrier was cancelled", ctx.label)
+    except Exception as exc:  
+        ctx.errors.append(str(exc))
+        logger.exception("%s failed with an unexpected error", ctx.label)
+        if rescan_barrier:
+            rescan_barrier.abort()
     finally:
         ctx.client.close()
 

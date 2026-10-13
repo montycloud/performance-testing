@@ -371,6 +371,14 @@ def step_fetch_findings(
     if cap > 0:
         items = items[:cap]
 
+    if ctx.client.dry_run and not items:
+        placeholder_count = cap if cap > 0 else 1
+        placeholder_status = next(iter(sorted(wanted)), "DRY_RUN")
+        items = [
+            {"Id": f"dry-run-finding-{i}", "InsightStatus": placeholder_status}
+            for i in range(placeholder_count)
+        ]
+
     ctx.findings = [
         {k: item.get(k) for k in _FINDING_FIELDS if k in item}
         for item in items
@@ -401,6 +409,9 @@ def step_fetch_findings(
 def _thread_spawn(calls: List[Any], max_workers: int) -> List[Any]:
     from concurrent.futures import ThreadPoolExecutor
 
+    if not calls:
+        return []
+    max_workers = max(1, min(max_workers, len(calls)))
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         return list(pool.map(lambda fn: fn(), calls))
 
