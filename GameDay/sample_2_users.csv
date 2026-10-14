@@ -1,0 +1,3 @@
+Root Email,Root Name,MSP Org Name,Root Password,Root New Password,Child Tenant 1 Name,Child Tenant 2 Name
+gamedaytest+team001@montycloud.com,GameDay MSP 001,NimbusMSP,GamedayTest@001,GamedayTest@001,Unicorn.Rentals,Blume Corporation
+gamedaytest+team002@montycloud.com,GameDay MSP 002,NimbusMSP,GamedayTest@002,GamedayTest@002,Unicorn.Rentals,Blume Corporation
