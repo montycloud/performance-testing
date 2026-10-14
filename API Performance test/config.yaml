@@ -82,7 +82,7 @@ test:
 health:
   # false (default) = Health Events calls never run; behaviour is identical
   # to before this feature was added.
-  enabled: true
+  enabled: false
 
   # mode controls how the Health Events flow fits into the user journey:
   #
@@ -105,7 +105,7 @@ health:
 chat:
   # false (default) = Chat flow never runs; behaviour is identical to before
   # this feature was added.
-  enabled: true
+  enabled: false
 
   # mode controls how the Chat flow fits into the user journey:
   #

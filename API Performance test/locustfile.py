@@ -60,18 +60,13 @@ _ENV_FILE = _HERE / ".env"
 
 load_dotenv(dotenv_path=_ENV_FILE, override=False)
 
+# common.py holds helpers shared with cost_dashboard_locustfile.py (signin,
+# authenticated GET, parallel batch runner, config/CSV bootstrap).
+if str(_HERE) not in sys.path:
+    sys.path.insert(0, str(_HERE))
+import common  # noqa: E402
 
-def _load_config() -> Dict[str, Any]:
-    if not _CONFIG_FILE.exists():
-        raise FileNotFoundError(
-            f"config.yaml not found at {_CONFIG_FILE}. "
-            "See config.yaml in this directory for a template."
-        )
-    with open(_CONFIG_FILE, "r", encoding="utf-8") as fh:
-        return yaml.safe_load(fh)
-
-
-CFG: Dict[str, Any] = _load_config()
+CFG: Dict[str, Any] = common.load_config(_CONFIG_FILE)
 
 BASE_URL: str = CFG["api"]["base_url"].rstrip("/")
 MC_DEBUG_MODE: bool = bool(CFG["api"].get("mc_debug_mode", True))
@@ -159,31 +154,11 @@ if _CHAT_TRANSCRIPT_PATH is not None:
     logger.info("Chat transcript logging enabled -> %s", _CHAT_TRANSCRIPT_PATH)
 
 
-def _redact_ws_url(url: str) -> str:
-    """Strip the JWT out of a WS URL before it ever reaches a log line."""
-    return re.sub(r"(Authorization=)[^&]+", r"\1<redacted>", url)
+# Alias kept so existing call sites below (_run_chat_ws / _log_chat_message)
+# don't need to change.
+_redact_ws_url = common.redact_ws_url
 
-
-def _load_users(csv_path: Path, limit: int) -> List[Dict[str, str]]:
-    """Load up to *limit* rows from the users CSV."""
-    if not csv_path.exists():
-        raise FileNotFoundError(
-            f"Users CSV not found: {csv_path}\n"
-            f"  Update 'test.users_csv' in config.yaml."
-        )
-    with open(csv_path, newline="", encoding="utf-8") as fh:
-        rows = list(csv.DictReader(fh))
-    if not rows:
-        raise ValueError(f"Users CSV is empty: {csv_path}")
-    users = rows[:limit]
-    logger.info(
-        "Loaded %d user(s) from %s  [user_count limit = %d]",
-        len(users), csv_path, limit,
-    )
-    return users
-
-
-USERS: List[Dict[str, str]] = _load_users(_users_csv_path, USER_COUNT)
+USERS: List[Dict[str, str]] = common.load_users(_users_csv_path, USER_COUNT, logger)
 
 
 def _load_queries(path: Path) -> List[str]:
@@ -246,17 +221,7 @@ if _CHAT_ENABLED:
 # Thread-safe round-robin user assignment
 # ---------------------------------------------------------------------------
 
-_index_lock = threading.Lock()
-_index_counter = 0
-
-
-def _claim_user() -> Dict[str, str]:
-    """Return the next user credential row, cycling through USERS list."""
-    global _index_counter
-    with _index_lock:
-        idx = _index_counter % len(USERS)
-        _index_counter += 1
-    return USERS[idx]
+_user_claimer = common.UserClaimer(USERS)
 
 
 # Track total completed journeys across all users (thread-safe).
@@ -310,7 +275,7 @@ class MontyCloudUser(HttpUser):
 
     def on_start(self) -> None:
         """Assign credentials, sign in, and fetch OrganizationId."""
-        self._creds: Dict[str, str] = _claim_user()
+        self._creds: Dict[str, str] = _user_claimer.claim()
         self._token: Optional[str] = None
         self._org_id: str = ""
         self._iterations_done: int = 0
@@ -329,72 +294,9 @@ class MontyCloudUser(HttpUser):
 
     def _signin(self) -> None:
         """POST /auth/signin → store JWT token, then GET /auth/user → store org_id."""
-        email = self._creds.get("Email", "")
-        # Use "New Password" (permanent, post-reset); fall back to "Password"
-        password = self._creds.get("New Password") or self._creds.get("Password", "")
-        with self.client.post(
-            "/auth/signin",
-            json={
-                "Username": email,
-                "Password": password,
-                "MC_DEBUG_MODE": MC_DEBUG_MODE,
-            },
-            name="[Auth] /auth/signin",
-            catch_response=True,
-            timeout=TIMEOUT,
-        ) as resp:
-            if resp.status_code != 200:
-                resp.failure(f"HTTP {resp.status_code}")
-                logger.error(
-                    "[%s] signin failed: HTTP %d — %s",
-                    email, resp.status_code, resp.text[:300],
-                )
-                return
-            try:
-                data = resp.json() or {}
-            except Exception:
-                resp.failure("Signin response is not valid JSON")
-                logger.error("[%s] signin response is not JSON", email)
-                return
-
-            token = data.get("Token", "")
-            if not token:
-                resp.failure("Signin response missing Token")
-                logger.error("[%s] signin response missing 'Token' field", email)
-                return
-
-            self._token = token
-            resp.success()
-            logger.info("[%s] signed in successfully", email)
-
-        if not self._token:
-            return
-
-        # Fetch OrganizationId
-        body: Dict[str, Any] = {}
-        with self.client.get(
-            "/auth/user",
-            headers={"authorization": self._token},
-            name="[Auth] /auth/user",
-            catch_response=True,
-            timeout=TIMEOUT,
-        ) as resp:
-            if resp.status_code != 200:
-                resp.failure(f"HTTP {resp.status_code}")
-                logger.error("[%s] GET /auth/user failed: HTTP %d", email, resp.status_code)
-                return
-            try:
-                body = resp.json() or {}
-                resp.success()
-            except Exception:
-                resp.failure("GET /auth/user response is not valid JSON")
-                return
-
-        self._org_id = body.get("OrganizationId", "")
-        if not self._org_id:
-            logger.warning("[%s] GET /auth/user returned no OrganizationId", email)
-        else:
-            logger.info("[%s] OrganizationId = %s", email, self._org_id)
+        self._token, self._org_id = common.signin(
+            self.client, self._creds, MC_DEBUG_MODE, TIMEOUT, logger,
+        )
 
     # ------------------------------------------------------------------
     # Generic GET helper
@@ -412,30 +314,9 @@ class MontyCloudUser(HttpUser):
         Returns the parsed JSON body (or {} on error).
         Records the request in Locust stats using *name* for grouping.
         """
-        headers: Dict[str, str] = {}
-        if self._token:
-            headers["authorization"] = self._token
-
-        body: Dict[str, Any] = {}
-        with self.client.get(
-            path,
-            headers=headers,
-            params=params,
-            name=name,
-            catch_response=True,
-            timeout=TIMEOUT,
-        ) as resp:
-            if resp.status_code >= 400:
-                resp.failure(f"HTTP {resp.status_code}")
-                logger.warning("FAIL  %-60s  →  HTTP %d", name, resp.status_code)
-            else:
-                try:
-                    body = resp.json() or {}
-                    resp.success()
-                except Exception:
-                    resp.failure("Response is not valid JSON")
-                    body = {}
-        return body
+        return common.authenticated_get(
+            self.client, self._token, path, name, TIMEOUT, logger, params=params,
+        )
 
     # ------------------------------------------------------------------
     # Parallel batch runner
@@ -443,10 +324,7 @@ class MontyCloudUser(HttpUser):
 
     def _run_batch(self, callables: List) -> None:
         """Spawn all callables as gevent greenlets and join (wait for all)."""
-        group = gevent.pool.Group()
-        for fn in callables:
-            group.spawn(fn)
-        group.join()
+        common.run_batch(callables)
 
     # ------------------------------------------------------------------
     # Main task
