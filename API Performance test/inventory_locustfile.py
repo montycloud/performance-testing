@@ -189,7 +189,7 @@ class InventoryUser(HttpUser):
 
 if not _INVENTORY_ENABLED:
     raise SystemExit(
-        "inventory.enabled is false in inventory_config.yaml — "
+        "inventory.enabled is false in config.yaml — "
         "nothing to run. Set it to true to execute this test."
     )
 if _INVENTORY_MODE != "standalone":
