@@ -33,7 +33,7 @@ def load_config(config_file: Path) -> Dict[str, Any]:
     if not config_file.exists():
         raise FileNotFoundError(
             f"Config file not found at {config_file}. "
-            "See config.yaml in this directory for a template."
+            f"See {config_file.name} in this directory for a template."
         )
     with open(config_file, "r", encoding="utf-8") as fh:
         return yaml.safe_load(fh)
