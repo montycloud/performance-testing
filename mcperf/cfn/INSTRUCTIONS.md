@@ -5,19 +5,19 @@ A Python CLI framework that provisions and tears down large numbers of AWS resou
 
 ## Entry Point
 ```bash
-python3 framework.py <create|scale|delete|status>
+python -m mcperf.cfn <create|scale|delete|status>
 ```
 
 ## Core Architecture
 
 | Module | Role |
 |--------|------|
-| `cfn/constants.py` | `BATCH_SIZE`, resource short-codes, state definitions, capability flags. No inter-module imports. |
-| `cfn/config.py` | Load/save `config.yaml` settings (prefix, region, S3 bucket, resource counts). |
-| `cfn/stack_names.py` | Stack naming: `{prefix}-{short}-{start:06d}-{end:06d}`. Names encode resource ranges. |
-| `cfn/templates.py` | CloudFormation template generators. One `gen_<type>(prefix, start, count)` per resource type. |
-| `cfn/stack_ops.py` | All boto3 calls: deploy, wait, delete, list, ensure prerequisites. |
-| `cfn/commands.py` | Command handlers: `cmd_create`, `cmd_scale`, `cmd_delete`, `cmd_status`. Shared logic in `_submit_stacks`. |
+| `mcperf/cfn/constants.py` | `BATCH_SIZE`, resource short-codes, state definitions, capability flags. No inter-module imports. |
+| `mcperf/cfn/config.py` | Load/save `config.yaml` settings (prefix, region, S3 bucket, resource counts). |
+| `mcperf/cfn/stack_names.py` | Stack naming: `{prefix}-{short}-{start:06d}-{end:06d}`. Names encode resource ranges. |
+| `mcperf/cfn/templates.py` | CloudFormation template generators. One `gen_<type>(prefix, start, count)` per resource type. |
+| `mcperf/cfn/stack_ops.py` | All boto3 calls: deploy, wait, delete, list, ensure prerequisites. |
+| `mcperf/cfn/commands.py` | Command handlers: `cmd_create`, `cmd_scale`, `cmd_delete`, `cmd_status`. Shared logic in `_submit_stacks`. |
 
 ## Key Design Patterns
 
@@ -29,18 +29,18 @@ python3 framework.py <create|scale|delete|status>
 ## Common Commands
 
 ```bash
-python3 framework.py create                              # create all enabled resources
-python3 framework.py scale --resource sns_topic --add 500  # add 500 more
-python3 framework.py delete --resource sqs_queue         # delete SQS stacks only
-python3 framework.py delete --all                        # delete everything
-python3 framework.py status                              # show deployed summary
+python -m mcperf.cfn create                              # create all enabled resources
+python -m mcperf.cfn scale --resource sns_topic --add 500  # add 500 more
+python -m mcperf.cfn delete --resource sqs_queue         # delete SQS stacks only
+python -m mcperf.cfn delete --all                        # delete everything
+python -m mcperf.cfn status                              # show deployed summary
 ```
 
 ## Adding a New Resource Type
 
-1. `cfn/constants.py`: Add to `BATCH_SIZE` and `RESOURCE_SHORT` dicts. Add to `NEEDS_NAMED_IAM` if IAM capability required.
-2. `cfn/templates.py`: Write `gen_<type>(prefix, start, count) -> dict` and register in `TEMPLATE_GENERATORS`.
-3. Test with `python3 framework.py create`.
+1. `mcperf/cfn/constants.py`: Add to `BATCH_SIZE` and `RESOURCE_SHORT` dicts. Add to `NEEDS_NAMED_IAM` if IAM capability required.
+2. `mcperf/cfn/templates.py`: Write `gen_<type>(prefix, start, count) -> dict` and register in `TEMPLATE_GENERATORS`.
+3. Test with `python -m mcperf.cfn create`.
 
 ## Currently Active Resources
 
@@ -51,7 +51,7 @@ python3 framework.py status                              # show deployed summary
 | s3_bucket | 50 | 1 |
 | lambda_function | 800 | 8 + 1 roles |
 
-## Config File (config.yaml)
+## Config File (scenarios/cfn/config.yaml)
 
 ```yaml
 global:
@@ -74,6 +74,6 @@ resources:
 ## Quick Facts
 
 - Stack naming has NO external state file—names are self-describing.
-- `framework.py` is intentionally thin (argparse + dispatch).
+- `mcperf/cfn/cli.py` is intentionally thin (argparse + dispatch).
 - All threading/concurrency in `stack_ops.py` and `commands.py`.
 - `create` is idempotent; safe to retry indefinitely.

@@ -9,7 +9,7 @@ The Lambda roles prerequisite stack is named:
   {prefix}-lambda-roles
 """
 
-from cfn.constants import SHORT_TO_RESOURCE
+from mcperf.cfn.constants import SHORT_TO_RESOURCE
 
 
 def make_stack_name(prefix: str, short: str, start: int, end: int) -> str:

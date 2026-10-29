@@ -1,5 +1,8 @@
 # GameDay User Creation Tool
 
+> **Archived — not maintained.** Kept for reference. The last working version is
+> tag `archive/gameday-v1`; see [../README.md](../README.md).
+
 A Python CLI that bulk-provisions MontyCloud root users from a CSV file, with **up to 10 parallel workers** (configurable). Each root user gets a full setup: signup → email verification → signin → preferences → subscription → tenant creation.
 
 ---

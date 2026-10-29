@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mcperf"
+version = "0.1.0"
+description = "MontyCloud performance-testing toolkit: shared library for load tests and AWS resource generation."
+requires-python = ">=3.10"
+dependencies = [
+    "PyYAML>=6.0",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+cfn = ["boto3>=1.34"]
+locust = ["locust>=2.20", "websocket-client>=1.7"]
+dev = ["pytest>=8", "ruff>=0.6"]
+all = ["mcperf[cfn,locust,dev]"]
+
+[tool.setuptools.packages.find]
+include = ["mcperf*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["e2e: runs Locust against a local mock API (slower, ~20s)"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+extend-exclude = ["archive", "API Performance test", "Security_bot", "knowledgebase"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]

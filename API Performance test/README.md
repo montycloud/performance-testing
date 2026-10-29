@@ -70,51 +70,21 @@ cp .env.example .env
 
 ## Inventory API Performance Test
 
-`inventory_locustfile.py` is a **separate, standalone** Locust scenario (its
-own file, own `HttpUser`, own `on_test_start`/`on_test_stop` hooks) covering
-the Inventory summary page: `GET /org/inventory-summary`. It reads the SAME
-`config.yaml` as `locustfile.py` — but only its own `inventory:` section —
-and shares sign-in/HTTP helpers with `cost_dashboard_locustfile.py` via
-`common.py`. It never runs as part of `MontyCloudUser`'s full journey.
-
-Flow per iteration: Signin → think time → Inventory Summary (`by-account` +
-`by-region` + `by-resourcetype`, parallel) → 1-3s pause.
-
-### Configuration — `config.yaml`'s `inventory:` section
-
-| Key | Default | Description |
-|-----|---------|-------------|
-| `api.base_url` | `https://stg1-api.montycloud.com` | Target API environment (shared with the main journey) |
-| `inventory.users_csv` / `inventory.user_count` | `./users.csv` / `1` | Self-contained — does not read the top-level `test:` block |
-| `inventory.iterations` | `5` | Journeys per user in `single_journey` mode |
-| `inventory.batch_think_time_min` / `max` | `1` / `3` | Pause after the Inventory batch |
-| `inventory.enabled` | `true` | Master toggle — set `false` to no-op the file |
-| `inventory.mode` | `standalone` | Only `standalone` is implemented today |
-| `inventory.cloud_provider` | `AWS` | Sent as `CloudProvider` on every call |
-| `inventory.batch_2_summary_types` | `[by-account, by-region, by-resourcetype]` | `SummaryType` values fired (single batch) |
-
-### Running the Inventory test
+Moved to the `mcperf` package (restructure phase 1). Flow code:
+`mcperf/api/inventory.py`; runnable scenario and its own config:
+`scenarios/api/inventory/`. From the repo root:
 
 ```bash
-python3 -m locust -f inventory_locustfile.py --headless \
-  --users 5 --spawn-rate 5 \
-  --html reports/inventory_report.html --csv reports/inventory_stats
+pip install -e ".[locust]"
+python -m locust -f scenarios/api/inventory/locustfile.py --headless \
+  --users 5 --spawn-rate 5 --csv reports/inventory --html reports/inventory.html
 ```
 
-### Running a user-count ramp (pipeline entry point)
-
-Use the existing generic sweep runner — no Inventory-specific script needed:
+User-count ramp with the existing sweep runner:
 
 ```bash
-# Run 1, 2, 3 ... N users sequentially, one report per count, plus a summary
-python3 run_users_sweep.py --locustfile inventory_locustfile.py --max-users 10
-
-# Or an explicit list of user counts
-python3 run_users_sweep.py --locustfile inventory_locustfile.py --users 1,5,10
+python3 run_users_sweep.py --locustfile ../scenarios/api/inventory/locustfile.py --max-users 10
 ```
-
-Make sure `config.yaml`'s `inventory.user_count` is >= the highest user count
-you sweep to (it governs how many CSV credential rows are loaded).
 
 ---
 
@@ -457,7 +427,6 @@ API Performance test/
 ├── common.py              Shared signin/config/HTTP helpers (used by the standalone flow files)
 ├── cost_dashboard_locustfile.py   Standalone Cost Dashboard scenario
 ├── cost_dashboard_config.yaml     Test configuration for cost_dashboard_locustfile.py
-├── inventory_locustfile.py        Standalone Inventory Summary scenario (reads config.yaml's inventory: section)
 ├── run_users_sweep.py     Generic 1..N user-count ramp runner (works with any --locustfile)
 ├── report_generator.py    Custom HTML report builder (shared by every locustfile above)
 ├── chat_queries.txt       Chat prompts (one per line) used by the Chat flow

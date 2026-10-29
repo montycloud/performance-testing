@@ -1,0 +1,41 @@
+# Inventory summary load test — scenarios/api/inventory/locustfile.py
+# Relative paths resolve against this file's directory.
+
+api:
+  base_url: "https://stg1-api.montycloud.com"
+  mc_debug_mode: true
+  timeout_seconds: 40
+
+load:
+  # Users CSV shared by all API scenarios (gitignored; copy users.csv.example).
+  users_csv: "../users.csv"
+  # Rows loaded from users_csv (first N). Keep >= Locust --users, otherwise
+  # credentials are recycled round-robin and users share accounts.
+  user_count: 4
+  # single_journey: each user runs `iterations` journeys, then the test stops.
+  # timed: users loop until --run-time.
+  run_mode: "single_journey"
+  iterations: 1
+  # Pause (seconds) between sign-in and the Inventory batch.
+  think_time_min: 2
+  think_time_max: 5
+  # Pause (seconds) after the Inventory batch.
+  batch_think_time_min: 1
+  batch_think_time_max: 3
+
+report:
+  # Report file: custom_<report_name>_<timestamp>.html, next to the --csv output.
+  report_name: "inventory"
+  description: |
+    Inventory API Performance Test
+    Standalone flow: Signin -> Inventory Summary (by-account + by-region +
+    by-resourcetype, parallel).
+
+inventory:
+  # Sent as CloudProvider on every /org/inventory-summary call.
+  cloud_provider: "AWS"
+  # SummaryType values fired in parallel in the single batch.
+  summary_types:
+    - "by-account"
+    - "by-region"
+    - "by-resourcetype"

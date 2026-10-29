@@ -10,22 +10,22 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import boto3
 from botocore.exceptions import ClientError
 
-from cfn.constants import (
+from mcperf.cfn.constants import (
     BATCH_SIZE,
     FAILED_STATES,
     HEALTHY_STATES,
     RESOURCE_SHORT,
 )
-from cfn.config import save_config
-from cfn.stack_names import make_stack_name, parse_stack_name
-from cfn.stack_ops import (
+from mcperf.cfn.config import save_config
+from mcperf.cfn.stack_names import make_stack_name, parse_stack_name
+from mcperf.cfn.stack_ops import (
     batch_delete,
     deploy_one,
     ensure_lambda_roles_stack,
     list_framework_stacks,
     wait_for_create,
 )
-from cfn.templates import TEMPLATE_GENERATORS
+from mcperf.cfn.templates import TEMPLATE_GENERATORS
 
 
 def cmd_create(cfg: dict) -> None:

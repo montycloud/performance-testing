@@ -13,15 +13,15 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from botocore.exceptions import ClientError
 
-from cfn.constants import (
+from mcperf.cfn.constants import (
     FAILED_STATES,
     INLINE_SIZE_LIMIT,
     MAX_WORKERS,
     NEEDS_NAMED_IAM,
     S3_KEY_PREFIX,
 )
-from cfn.stack_names import make_stack_name, parse_stack_name
-from cfn.templates import lambda_roles_template
+from mcperf.cfn.stack_names import make_stack_name, parse_stack_name
+from mcperf.cfn.templates import lambda_roles_template
 
 
 # ---------------------------------------------------------------------------

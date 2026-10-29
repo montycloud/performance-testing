@@ -1,10 +1,12 @@
-"""Load and persist config.yaml."""
+"""Load and persist the cfn config (scenarios/cfn/config.yaml, or $MCPERF_CFN_CONFIG)."""
 
+import os
 from pathlib import Path
 
 import yaml
 
-CONFIG_FILE = Path(__file__).parent.parent / "config.yaml"
+_DEFAULT_CONFIG = Path(__file__).resolve().parents[2] / "scenarios" / "cfn" / "config.yaml"
+CONFIG_FILE = Path(os.environ.get("MCPERF_CFN_CONFIG", _DEFAULT_CONFIG))
 
 
 def load_config() -> dict:

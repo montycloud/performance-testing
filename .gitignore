@@ -10,3 +10,12 @@ __pycache__/
 
 # Load-test run output (logger.py recreates the dir on each run)
 knowledgebase/loadtest/logs/
+
+# Packaging
+*.egg-info/
+build/
+
+# Local credentials and run output for mcperf scenarios
+scenarios/**/users.csv
+scenarios/**/.env
+reports/

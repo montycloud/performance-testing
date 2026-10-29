@@ -33,7 +33,7 @@ python3 -m locust -f locustfile.py --headless --users N --spawn-rate R \
 | `run_chat_executions.py` | Standalone sweep runner — see "Chat-query sweep runner" section below. Does **not** modify `locustfile.py`/`report_generator.py`. |
 | `common.py` | Shared signin/config-load/users-CSV/authenticated-GET/`run_batch` helpers, extracted so standalone flow files (below) don't duplicate `locustfile.py`'s inline versions. Every function takes its inputs as parameters — it never reads a config file directly. |
 | `cost_dashboard_locustfile.py` + `cost_dashboard_config.yaml` | Separate standalone Locust scenario for the Cost Dashboard page. Own config file, own `HttpUser` subclass, imports `common.py`. Does not touch `locustfile.py`/`config.yaml`. |
-| `inventory_locustfile.py` | Separate standalone Locust scenario for the Inventory summary page (`GET /org/inventory-summary`). Reads the SAME `config.yaml` as `locustfile.py`, but only its own `inventory:` section (self-contained: own `users_csv`/`iterations`/think times, does not read the top-level `test:` block). See "Standalone flow files" section below. |
+| ~~`inventory_locustfile.py`~~ | Moved to `mcperf/api/inventory.py` + `scenarios/api/inventory/` (restructure phase 1). |
 | `run_users_sweep.py` | Generic pipeline runner: re-runs any `--locustfile` headless once per user-count in 1..N (or an explicit `--users` list), each with its own `--csv`/`--html`, non-zero exit if any run failed. Used for the Inventory/Cost Dashboard "ramp test" use case — no per-flow script needed. |
 
 ## The five flows (all in `MontyCloudUser`)
@@ -128,14 +128,14 @@ preference/blast-radius tolerance):
   `locustfile.py` run is happening at the same time.
 
 1. Add config per one of the two sub-options above.
-2. Create `yourflow_locustfile.py`, copied structurally from
-   `inventory_locustfile.py`/`cost_dashboard_locustfile.py`: bootstrap via
-   `common.load_config`/`common.load_users`/`common.UserClaimer`, an
-   `HttpUser` subclass using `common.signin`/`common.authenticated_get`/
-   `common.run_batch`, a `_yourflow_flow()` method with `[YourFlow]`-prefixed
-   request names, and the same `on_test_start`/`on_test_stop` event hooks
-   (copy verbatim — they call `report_generator.generate(...)` the same way).
-3. Extend `report_generator.py` the same 8 spots as Pattern A step 5 (row
+2. **New flows use the mcperf pattern, not a copied locustfile.** Add
+   `mcperf/api/yourflow.py` with a `YourFlowConfig(ScenarioConfig)` and a
+   `YourFlowUser(MontyCloudUser)` that implements only `run_flow()` using
+   `self.api_get`/`self.run_batch` and `[YourFlow]`-prefixed request names.
+   Then add `scenarios/api/yourflow/locustfile.py` (one `register_scenario(...)`
+   call) and its `config.yaml`. `mcperf/api/inventory.py` +
+   `scenarios/api/inventory/` is the reference implementation.
+3. Extend `mcperf/reporting/locust_report.py` the same 8 spots as Pattern A step 5 (row
    bucketing, `_full_html`/`_throughput_section_html` params, a `_card(...)`,
    a `_section(...)` line, 2 CSS rules) — `_section()` already hides itself
    when its row list is empty, so nothing else is needed to keep the report

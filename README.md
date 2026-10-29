@@ -1,166 +1,69 @@
-# AWS Resource Creation Framework for performance testing
+# MontyCloud performance testing
 
-A Python framework that provisions and tears down large numbers of AWS resources via CloudFormation. Resources are automatically split across multiple stacks to stay within CloudFormation's 500-resource-per-stack limit.
+Load tests and test-data generators for the MontyCloud platform.
 
-## Prerequisites
-
-- Python 3.10+
-- AWS credentials configured (`aws configure` or environment variables)
-- An existing S3 bucket for template uploads (required when a stack template exceeds 40 KB)
+The repo is mid-restructure onto one shared package, `mcperf`. Migrated tools
+live under `mcperf/` (code) and `scenarios/` (what you run, with its config).
+The rest still run from their original folders until their phase lands.
 
 ## Setup
 
-```bash
-pip install -r requirements.txt
-```
-
-## Configuration
-
-Edit `config.yaml` before running any command.
-
-```yaml
-global:
-  prefix: mc-perftest       # prepended to every resource name
-  region: us-east-1
-  s3_bucket: my-bucket      # used for large template uploads
-
-resources:
-  sns_topic:
-    enabled: true
-    count: 4500
-  sqs_queue:
-    enabled: true
-    count: 4500
-  # ... more resource types
-```
-
-| Field | Description |
-|---|---|
-| `prefix` | Name prefix for all resources and stacks |
-| `region` | AWS region to deploy into |
-| `s3_bucket` | S3 bucket for oversized CFN templates (must already exist) |
-| `enabled` | `true` to include this type in create/scale operations |
-| `count` | Total number of resources to provision (`0` = nothing to do) |
-
-## Commands
-
-### `create` — provision all enabled resources
+Python 3.10+. From the repo root:
 
 ```bash
-python3 framework.py create
+python3 -m venv .venv && source .venv/bin/activate
 ```
-
-Reads `config.yaml` and creates CloudFormation stacks for every resource type where `enabled: true` and `count > 0`. Already-deployed stacks are skipped (safe to re-run).
-
-**Example output**
-```
-[sns_topic] 4500 resources -> 23 stack(s)
-  Submitting 23 stack(s) ...
-    + mc-perftest-sns-000001-000200: created
-    + mc-perftest-sns-000201-000400: created
-    ...
-    Waiting for 23 stack(s)...............
-  All 23 stack(s) created successfully.
-
-[lambda_function] 800 resources -> 8 stack(s)
-  Creating mc-perftest-lambda-roles ...
-    Waiting for 1 stack(s)..
-  Submitting 8 stack(s) ...
-    ...
-```
-
----
-
-### `scale` — add more resources to a deployed type
 
 ```bash
-python3 framework.py scale --resource <type> --add <n>
+pip install -e ".[all]"
 ```
 
-Finds the highest-indexed resource already deployed for that type, then creates new stacks starting from the next index. Updates `count` in `config.yaml` when done.
+Copy `scenarios/api/users.csv.example` to `scenarios/api/users.csv` and fill in
+real test users. It is gitignored; never commit credentials.
+
+## Tools
+
+| Tool | Run | Code | Status |
+|---|---|---|---|
+| AWS resource generator (CloudFormation) | `python -m mcperf.cfn <create\|scale\|delete\|status>` | `mcperf/cfn/` · [README](mcperf/cfn/README.md) | migrated |
+| Inventory summary load test | `locust -f scenarios/api/inventory/locustfile.py` | `mcperf/api/inventory.py` | migrated (pilot) |
+| Main journey, Cost Dashboard, Day2SDK load tests | see [API Performance test/README.md](API%20Performance%20test/README.md) | `API Performance test/` | phase 3 |
+| Security Bot rescan test | see [Security_bot/README.md](Security_bot/README.md) | `Security_bot/` | phase 5 (moves under `mcperf/api/`) |
+| Knowledge Base upload test | see [knowledgebase/loadtest/README.md](knowledgebase/loadtest/README.md) | `knowledgebase/loadtest/` | phase 5 |
+| GameDay user provisioning | archived | `archive/gameday/` | unmaintained; tag `archive/gameday-v1` |
+
+## Layout
+
+```
+mcperf/            library: reusable, tested, no config or data files
+  core/            config, credentials, redaction (no Locust/boto3 imports)
+  locust/          MontyCloudUser base class, batches, sign-in/GET helpers, run hooks
+  reporting/       custom HTML report from Locust CSV stats
+  api/             one flow module per product area
+  cfn/             CloudFormation resource generator
+scenarios/         thin entry points + their config.yaml and data
+tests/             pytest; mirrors mcperf/
+archive/           unmaintained tools kept for reference
+```
+
+## Adding a Locust scenario
+
+1. `mcperf/api/<flow>.py`: a `<Flow>Config(ScenarioConfig)` for its own config
+   section, and a `<Flow>User(MontyCloudUser)` that implements only `run_flow()`.
+   Prefix request names with `[<Flow>]`.
+2. `scenarios/api/<flow>/locustfile.py`: one `register_scenario(...)` call, plus
+   its `config.yaml` (sections `api`, `load`, `report`, `<flow>`).
+3. A test in `tests/`. `tests/scenarios/test_inventory_e2e.py` shows how to run a
+   scenario against a local mock API.
+
+`mcperf/api/inventory.py` and `scenarios/api/inventory/` are the reference.
+
+## Tests
 
 ```bash
-# Add 500 more SNS topics on top of existing 4500 → new total: 5000
-python3 framework.py scale --resource sns_topic --add 500
-
-# Add 200 more Lambda functions
-python3 framework.py scale --resource lambda_function --add 200
+pytest
 ```
-
----
-
-### `delete` — remove stacks
-
-Delete a single resource type:
-```bash
-python3 framework.py delete --resource sns_topic
-python3 framework.py delete --resource sqs_queue
-python3 framework.py delete --resource lambda_function
-```
-
-Delete everything (all resource stacks + the Lambda roles stack):
-```bash
-python3 framework.py delete --all
-```
-
----
-
-### `status` — show what is deployed
 
 ```bash
-python3 framework.py status
+ruff check mcperf tests scenarios
 ```
-
-**Example output**
-```
-Resource                    Stacks   Resources  Status
-----------------------------------------------------------------------
-lambda_function                  8         800  CREATE_COMPLETE
-s3_bucket                        1          50  CREATE_COMPLETE
-sns_topic                       23        4500  CREATE_COMPLETE
-sqs_queue                       23        4500  CREATE_COMPLETE
-
-  Lambda roles stack (mc-perftest-lambda-roles): CREATE_COMPLETE
-
-Total resource stacks: 55
-```
-
----
-
-## Resource coverage
-
-| Resource | Generator | Notes |
-|---|---|---|
-| `sns_topic` | Yes | 200 per stack |
-| `sqs_queue` | Yes | 200 per stack |
-| `s3_bucket` | Yes | 100 per stack; names must be globally unique |
-| `lambda_function` | Yes | 100 per stack; requires a shared IAM role stack |
-| `dynamodb_table` | Yes | 100 per stack; PAY_PER_REQUEST billing |
-| `iam_policy` | Yes | 50 per stack |
-| `iam_role` | Yes | 50 per stack |
-| `iam_user` | Yes | 50 per stack |
-| `auto_scaling_group` | No | Enable once a generator is added |
-| `vpc` / `subnet` / `security_group` / `route_table` / `internet_gateway` / `vpc_peering_connection` / `network_acl` / `target_group` | No | Enable once generators are added |
-
-## How stacks are named
-
-```
-{prefix}-{short}-{start:06d}-{end:06d}
-
-Examples:
-  mc-perftest-sns-000001-000200
-  mc-perftest-sqs-002801-003000
-  mc-perftest-lambda-000101-000200
-  mc-perftest-lambda-roles          ← shared IAM role for Lambda
-```
-
-The start/end indices are encoded in the stack name so the framework can detect gaps and resume without extra state files.
-
-## Lambda dependency
-
-Lambda functions need an execution role. The framework automatically creates a `{prefix}-lambda-roles` stack that exports the role ARN, and each Lambda batch stack imports it. When running `delete --all`, Lambda batch stacks are deleted first, then the roles stack.
-
-## Large templates and S3
-
-CloudFormation's inline template limit is 51 KB. Any template that exceeds 40 KB is automatically uploaded to `s3_bucket` under the `cfn-templates/` prefix before deployment. The S3 bucket must already exist.
-
