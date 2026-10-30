@@ -13,11 +13,13 @@ file's directory, not the current working directory.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+from mcperf.core import environments
 
 RUN_MODES = ("single_journey", "timed")
 
@@ -54,13 +56,21 @@ class ApiSettings:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> ApiSettings:
-        if not d.get("base_url"):
-            raise ValueError("api.base_url is required.")
+        """Accepts either `env: stg1` (see mcperf.core.environments) or an explicit `base_url`."""
+        if d.get("base_url"):
+            url = str(d["base_url"])
+        elif d.get("env"):
+            url = environments.base_url(str(d["env"]))
+        else:
+            raise ValueError("api.env or api.base_url is required.")
         return cls(
-            base_url=str(d["base_url"]).rstrip("/"),
+            base_url=url.rstrip("/"),
             mc_debug_mode=bool(d.get("mc_debug_mode", True)),
             timeout=int(d.get("timeout_seconds", 40)),
         )
+
+    def for_env(self, env: str) -> ApiSettings:
+        return replace(self, base_url=environments.base_url(env))
 
 
 @dataclass(frozen=True)
@@ -139,3 +149,16 @@ class ScenarioConfig:
     @classmethod
     def load_file(cls, path: Path) -> ScenarioConfig:
         return cls(**cls.base_kwargs(path))
+
+    def with_overrides(self, env: str | None = None, report_name: str | None = None) -> ScenarioConfig:
+        """Apply command-line overrides (--env, --report-name) on top of the file."""
+        cfg = self
+        if env:
+            cfg = replace(cfg, api=cfg.api.for_env(env))
+        if report_name:
+            cfg = replace(cfg, report=replace(cfg.report, report_name=report_name))
+        return cfg
+
+    def resolve(self, raw: str | Path) -> Path:
+        """Resolve a path from this config relative to the config file's directory."""
+        return resolve_path(raw, self.path.parent)

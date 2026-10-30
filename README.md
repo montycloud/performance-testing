@@ -26,8 +26,8 @@ real test users. It is gitignored; never commit credentials.
 | Tool | Run | Code | Status |
 |---|---|---|---|
 | AWS resource generator (CloudFormation) | `python -m mcperf.cfn <create\|scale\|delete\|status>` | `mcperf/cfn/` · [README](mcperf/cfn/README.md) | migrated |
-| Inventory summary load test | `locust -f scenarios/api/inventory/locustfile.py` | `mcperf/api/inventory.py` | migrated (pilot) |
-| Main journey, Cost Dashboard, Day2SDK load tests | see [API Performance test/README.md](API%20Performance%20test/README.md) | `API Performance test/` | phase 3 |
+| API load tests: main journey (Home, WAFR, Health, AI Chat), Cost Dashboard, Inventory, Day2SDK | `locust -f scenarios/api/<scenario>/locustfile.py` · [README](scenarios/api/README.md) | `mcperf/api/` | migrated |
+| Sweeps: user-count ramp, chat-query sweep, sweep summary | `python -m mcperf.runners.<users_sweep\|chat_sweep\|execution_summary>` | `mcperf/runners/` | moved; merge in phase 4 |
 | Security Bot rescan test | see [Security_bot/README.md](Security_bot/README.md) | `Security_bot/` | phase 5 (moves under `mcperf/api/`) |
 | Knowledge Base upload test | see [knowledgebase/loadtest/README.md](knowledgebase/loadtest/README.md) | `knowledgebase/loadtest/` | phase 5 |
 | GameDay user provisioning | archived | `archive/gameday/` | unmaintained; tag `archive/gameday-v1` |
@@ -36,10 +36,11 @@ real test users. It is gitignored; never commit credentials.
 
 ```
 mcperf/            library: reusable, tested, no config or data files
-  core/            config, credentials, redaction (no Locust/boto3 imports)
+  core/            config, environments, credentials, redaction (no Locust/boto3 imports)
   locust/          MontyCloudUser base class, batches, sign-in/GET helpers, run hooks
   reporting/       custom HTML report from Locust CSV stats
-  api/             one flow module per product area
+  api/             one flow module per scenario; pages/ holds reusable page flows
+  runners/         sweeps that run a scenario repeatedly
   cfn/             CloudFormation resource generator
 scenarios/         thin entry points + their config.yaml and data
 tests/             pytest; mirrors mcperf/
@@ -53,8 +54,9 @@ archive/           unmaintained tools kept for reference
    Prefix request names with `[<Flow>]`.
 2. `scenarios/api/<flow>/locustfile.py`: one `register_scenario(...)` call, plus
    its `config.yaml` (sections `api`, `load`, `report`, `<flow>`).
-3. A test in `tests/`. `tests/scenarios/test_inventory_e2e.py` shows how to run a
-   scenario against a local mock API.
+3. A test in `tests/`. `tests/scenarios/test_scenarios_e2e.py` runs every
+   scenario against a local mock API (`tests/scenarios/mock_api.py`) and pins
+   its request counts.
 
 `mcperf/api/inventory.py` and `scenarios/api/inventory/` are the reference.
 

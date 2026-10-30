@@ -1,0 +1,68 @@
+# Day2SDK public API load test — scenarios/api/day2sdk/locustfile.py
+# Relative paths resolve against this file's directory.
+#
+# Credentials are NOT read from users.csv: each simulated user gets a static
+# AccessKey/SecretKey pair from DAY2SDK_ACCESS_KEY_<N> / DAY2SDK_SECRET_KEY_<N>
+# (in .env next to this file; see .env.example), assigned round-robin.
+
+api:
+  # dev1 or stg1 (see mcperf/core/environments.py). --env dev|stg on the command line wins.
+  env: "stg1"
+  timeout_seconds: 40
+
+load:
+  # single_journey: each user runs `iterations` journeys, then the test stops.
+  run_mode: "single_journey"
+  iterations: 1
+  # Pause (seconds) before each journey.
+  think_time_min: 1
+  think_time_max: 2
+
+report:
+  report_name: "day2sdk_api_user_1"
+  description: |
+    Day2SDK API GET performance test (tag-based journey)
+    Auth (always, sequential first): GET /auth/user, /roles
+    Then every enabled tag below runs in PARALLEL (each internally sequential):
+      Tenant: GET /tenants, /tenants/categories, /tenants/{TenantId}
+      Assessment: per tenant — assessments list + detail/findings/top-checks/
+        top-resources/summary/schedules for the first assessment found
+      User: per tenant — GET /tenants/{TenantId}/users
+      Account: per tenant — GET accounts list (CloudProvider=AWS) +
+        accounts/count + region-status for one randomly-picked account
+      Resource: per tenant — GET resources/regions, resource-types, resources,
+        inventory-summary (CloudProvider=AWS, SummaryType=By-Account)
+      Health: per tenant — GET health/events/summary, health/policies,
+        health/events/breakdown-summary (Dimension=EventTypeCode)
+      Project: per tenant — GET projects, projects/requests
+      Security: per tenant — GET posture/summary (ReportType=SHIP,
+        Dimension=TENANT_SUMMARY), services list, first service's summary,
+        checks/summary, top-entities (Dimension=SERVICES)
+      Organization: GET /organizations (captures OrganizationId for a future
+        Workload tag; independent of Tenant)
+    Auth: static AccessKey/SecretKey pairs from .env (DAY2SDK_ACCESS_KEY_N /
+    DAY2SDK_SECRET_KEY_N). users.csv is NOT used for this test.
+
+day2sdk:
+  # Tags to exercise. Auth always runs. Tenant defaults on, the rest off.
+  tags:
+    tenant: true
+    assessment: true
+    user: true
+    account: true
+    resource: false
+    health: true
+    project: true
+    security: false
+    organization: true
+
+  # Page size for the shared /tenants call.
+  tenants_page_size: 10
+  # Status filter for the Assessment tag's list call (required by the API).
+  assessment_status: "PENDING"
+  # Organization tag paging (both required by the API).
+  organizations_page_number: 1
+  organizations_page_size: 10
+
+  # WARNING+ log lines (incl. full failure dumps) are appended here. Blank disables.
+  failures_log: "./reports/day2sdk_failures.log"

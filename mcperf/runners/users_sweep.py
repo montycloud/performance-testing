@@ -6,15 +6,19 @@ Runs a Locust file headless once per user-count in 1..N, each as its own
 sequential run with its own --csv/--html output, so a CI/pipeline step can
 verify behavior at increasing concurrency without hand-editing config.
 
-Does NOT touch config.yaml/cost_dashboard_config.yaml — only Locust's own
---users flag changes between runs (user_count in config governs how many
-credential rows are loaded from the CSV; make sure it's >= --max-users).
+Never touches a config file — only Locust's own --users flag changes between
+runs (load.user_count in the scenario config governs how many credential rows
+are loaded; make sure it's >= --max-users). Extra arguments are passed through
+to Locust (e.g. --env stg1, --mc-config other.yaml).
 
-Usage:
-    python3 run_users_sweep.py
-    python3 run_users_sweep.py --locustfile cost_dashboard_locustfile.py --max-users 5
-    python3 run_users_sweep.py --locustfile locustfile.py --max-users 10 --spawn-rate 5 --run-time 3m
-    python3 run_users_sweep.py --users 1,2,5,10   # explicit list instead of 1..N
+Usage (from the repo root):
+    python -m mcperf.runners.users_sweep --locustfile scenarios/api/cost_dashboard/locustfile.py --max-users 5
+    python -m mcperf.runners.users_sweep --locustfile scenarios/api/journey/locustfile.py \
+        --max-users 10 --spawn-rate 5 --run-time 3m
+    python -m mcperf.runners.users_sweep --locustfile scenarios/api/inventory/locustfile.py --users 1,2,5,10
+
+Output: <reports-dir>/sweep_<scenario>_<N>u_stats.csv / .html, where <scenario>
+is the locustfile's folder name.
 
 Exit code is non-zero if any individual run failed, so this can be used
 directly as a single CI/pipeline step.
@@ -26,8 +30,6 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
-_HERE = Path(__file__).parent
-_REPORTS_DIR = _HERE / "reports"
 
 
 def _parse_user_counts(args: argparse.Namespace) -> List[int]:
@@ -49,15 +51,22 @@ def _parse_user_counts(args: argparse.Namespace) -> List[int]:
     return list(range(1, args.max_users + 1))
 
 
-def _run_one(locustfile: str, users: int, spawn_rate: int, run_time: Optional[str], extra_args: List[str]) -> int:
+def _scenario_name(locustfile: Path) -> str:
+    return locustfile.parent.name if locustfile.stem == "locustfile" else locustfile.stem
+
+
+def _run_one(
+    locustfile: Path, reports_dir: Path, users: int, spawn_rate: int,
+    run_time: Optional[str], extra_args: List[str],
+) -> int:
     label = f"{users}u"
-    csv_prefix = _REPORTS_DIR / f"sweep_{Path(locustfile).stem}_{label}"
-    html_out = _REPORTS_DIR / f"sweep_{Path(locustfile).stem}_{label}.html"
-    _REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    csv_prefix = reports_dir / f"sweep_{_scenario_name(locustfile)}_{label}"
+    html_out = reports_dir / f"sweep_{_scenario_name(locustfile)}_{label}.html"
+    reports_dir.mkdir(parents=True, exist_ok=True)
 
     cmd = [
         sys.executable, "-m", "locust",
-        "-f", locustfile,
+        "-f", str(locustfile),
         "--headless",
         "--users", str(users),
         "--spawn-rate", str(spawn_rate),
@@ -69,7 +78,7 @@ def _run_one(locustfile: str, users: int, spawn_rate: int, run_time: Optional[st
     cmd += extra_args
 
     print(f"\n{'=' * 70}\nRun: users={users}  ->  {csv_prefix}\n{'=' * 70}")
-    proc = subprocess.run(cmd, cwd=str(_HERE))
+    proc = subprocess.run(cmd)
     return proc.returncode
 
 
@@ -79,8 +88,12 @@ def main() -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
-        "--locustfile", default="cost_dashboard_locustfile.py",
-        help="Locust file to run (default: cost_dashboard_locustfile.py)",
+        "--locustfile", required=True,
+        help="Locust file to run, e.g. scenarios/api/cost_dashboard/locustfile.py",
+    )
+    parser.add_argument(
+        "--reports-dir", default="reports",
+        help="Where CSV/HTML output goes (default: ./reports)",
     )
     parser.add_argument(
         "--max-users", type=int, default=5,
@@ -101,7 +114,7 @@ def main() -> int:
     )
     args, extra_args = parser.parse_known_args()
 
-    locustfile_path = _HERE / args.locustfile
+    locustfile_path = Path(args.locustfile).resolve()
     if not locustfile_path.exists():
         print(f"Locust file not found: {locustfile_path}", file=sys.stderr)
         return 2
@@ -114,7 +127,8 @@ def main() -> int:
 
     failures: List[int] = []
     for users in user_counts:
-        rc = _run_one(args.locustfile, users, args.spawn_rate, args.run_time, extra_args)
+        rc = _run_one(locustfile_path, Path(args.reports_dir).resolve(), users, args.spawn_rate,
+                      args.run_time, extra_args)
         if rc != 0:
             failures.append(users)
             print(f"Run with users={users} FAILED (exit code {rc}).", file=sys.stderr)

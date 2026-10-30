@@ -2,8 +2,8 @@
 """Extract per-execution summary rows from chat sweep report artifacts.
 
 Usage:
-    python3 extract_execution_summary.py \
-      --manifest executions_wafr.yaml \
+    python -m mcperf.runners.execution_summary \
+      --manifest scenarios/api/journey/executions/wafr.yaml \
       --reports-dir reports/reports_executed_on_ec2/.../WAFR/1_parallel_users
 
 The script matches each execution name in the manifest to its generated files:
@@ -60,14 +60,13 @@ class ExecutionArtifacts:
 
 
 def _parse_args() -> argparse.Namespace:
-    here = Path(__file__).resolve().parent
     parser = argparse.ArgumentParser(
         description="Extract a CSV summary from a chat sweep manifest and report folder."
     )
     parser.add_argument(
         "--manifest",
         required=True,
-        help="Path to the executions_*.yaml manifest.",
+        help="Path to the chat sweep manifest (e.g. scenarios/api/journey/executions/wafr.yaml).",
     )
     parser.add_argument(
         "--reports-dir",
@@ -95,7 +94,6 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Exit non-zero if any execution is missing its stats CSV.",
     )
-    parser.set_defaults(base_dir=here)
     return parser.parse_args()
 
 
@@ -349,7 +347,7 @@ def _write_csv(rows: List[Dict[str, str]], output_path: Optional[Path]) -> None:
 
 def main() -> int:
     args = _parse_args()
-    base_dir = Path(__file__).resolve().parent
+    base_dir = Path.cwd()
     manifest_path = _resolve_path(args.manifest, base_dir)
     reports_dir = _resolve_path(args.reports_dir, base_dir)
 

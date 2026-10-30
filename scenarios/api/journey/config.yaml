@@ -1,0 +1,79 @@
+# Main user journey — scenarios/api/journey/locustfile.py
+# Home Page → WAFR → optional Health Events → optional AI Chat.
+# Relative paths resolve against this file's directory.
+
+api:
+  # Or `env: stg1` (see mcperf/core/environments.py); --env on the command line wins.
+  base_url: "https://stg1-api.montycloud.com"
+  # Sent as MC_DEBUG_MODE in every signin payload (bypasses CAPTCHA checks).
+  mc_debug_mode: true
+  timeout_seconds: 40
+
+load:
+  # Users CSV shared by all API scenarios (gitignored; copy ../users.csv.example).
+  # Sign-in uses Email + "New Password" (falls back to "Password").
+  users_csv: "../users.csv"
+  # Rows loaded from users_csv (first N). Locust --users sets concurrency:
+  #   user_count=10 + --users 10 → 10 unique accounts
+  #   user_count=10 + --users 20 → 10 accounts recycled round-robin
+  user_count: 50
+  # single_journey: each user runs `iterations` journeys, then the test stops
+  #                 (use --users N, no --run-time needed).
+  # timed:          users loop until --run-time; `iterations` is ignored.
+  run_mode: "single_journey"
+  iterations: 20
+  # Pause (seconds) between pages: Home → WAFR, and before Health / Chat.
+  # Set both to 0 to disable.
+  think_time_min: 2
+  think_time_max: 5
+
+report:
+  # Report file: custom_<report_name>_<timestamp>.html, next to the --csv output.
+  # Use snake_case or hyphens; blank means "report".
+  report_name: "report_AI_Chat_User_1_Tenants_3_Medium_Query_net_Cost_for_2_months_run_4"
+  description: |
+     AI Conversation Chat
+     Total Users 1
+     Tenants 3  ( MSP ,Tenant 1 and Tenant 2 )
+     Query: Tenant Net Cost Report \n Scope \n * Analyze cloud net costs for selected tenant(s) for the last two complete calendar months
+
+wafr:
+  # Pause (seconds) between batches inside the WAFR page. Defaults to load.think_time_*.
+  think_time_min: 1
+  think_time_max: 3
+
+health:
+  enabled: false
+  # appended:   ... WAFR → think → Health
+  # standalone: sign in → think → Health only (skips Home and WAFR)
+  mode: "standalone"
+
+chat:
+  enabled: false
+  # appended:   ... WAFR → (Health) → think → Chat
+  # standalone: sign in → think → Chat only
+  # Each chat call opens one WebSocket, sends one query, and closes.
+  mode: "standalone"
+
+  # WebSocket endpoint. Authorization, OrganizationId (the signed-in user's own
+  # org) and agentic=true are appended automatically.
+  ws_base_url: "wss://fw6ru70i23.execute-api.us-east-2.amazonaws.com/stg1"
+
+  # One prompt per line; a random line is picked per chat call. `#` lines are ignored.
+  queries_file: "./chat_queries.txt"
+  # JSON list of {ID, Name, ...}; ALL entries are sent as tenant_scope on every call.
+  tenants_file: "./Tenant.json"
+
+  # Metadata sent with every query.
+  model_id: ""
+  temperature: 0.1
+  top_p: 1
+  top_k: 250
+
+  # Seconds to wait for the PROMPT_STATUS/ENDED frame before failing the call.
+  timeout_seconds: 1500
+  # On SESSION_TIME_LIMIT_REACHED, retry up to N times with "yes Continue" on the same thread.
+  max_session_retries: 5
+
+  # Per-message transcript log; blank disables it.
+  transcript_log: "./reports/chat_transcript.log"

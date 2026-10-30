@@ -10,9 +10,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from functools import partial
 from pathlib import Path
-from typing import Any
 
 from mcperf.core.config import ScenarioConfig, require_section
 from mcperf.locust.base_user import MontyCloudUser
@@ -42,12 +40,12 @@ class InventoryUser(MontyCloudUser):
     log = logging.getLogger("perf_test.inventory")
 
     def run_flow(self) -> None:
-        self.run_batch(partial(self.inventory_summary, t) for t in self.cfg.summary_types)
-        self.batch_think()
-
-    def inventory_summary(self, summary_type: str) -> dict[str, Any]:
-        return self.api_get(
-            "/org/inventory-summary",
-            f"[Inventory] inventory-summary ({summary_type})",
-            params={"CloudProvider": self.cfg.cloud_provider, "SummaryType": summary_type},
+        self.run_batch(
+            self.call(
+                "/org/inventory-summary",
+                f"[Inventory] inventory-summary ({summary_type})",
+                {"CloudProvider": self.cfg.cloud_provider, "SummaryType": summary_type},
+            )
+            for summary_type in self.cfg.summary_types
         )
+        self.batch_think()

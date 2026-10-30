@@ -2,7 +2,8 @@
 
 register_scenario() is the only call a locustfile needs. It:
   1. adds --mc-config (env MCPERF_CONFIG) so sweeps can point at another config
-     file without rewriting one in place;
+     file without rewriting one in place, --env to pick a MontyCloud
+     environment (overrides api.base_url), and --report-name;
   2. loads and validates the config on Locust's init event, then configures the
      user class;
   3. in single_journey mode, quits once every user has finished;
@@ -20,6 +21,7 @@ from locust import events
 from locust.runners import STATE_CLEANUP, STATE_STOPPED, STATE_STOPPING, WorkerRunner
 from locust.stats import CSV_STATS_FLUSH_INTERVAL_SEC, CSV_STATS_INTERVAL_SEC
 
+from mcperf.core import environments
 from mcperf.core.config import ScenarioConfig
 from mcperf.locust.base_user import MontyCloudUser
 
@@ -34,7 +36,7 @@ def register_scenario(
     config_cls: type[ScenarioConfig] = ScenarioConfig,
 ) -> None:
     @events.init_command_line_parser.add_listener
-    def _add_config_arg(parser, **_kwargs) -> None:
+    def _add_args(parser, **_kwargs) -> None:
         parser.add_argument(
             "--mc-config",
             type=str,
@@ -42,16 +44,32 @@ def register_scenario(
             default=str(default_config),
             help=f"Scenario config YAML (default: {default_config})",
         )
+        parser.add_argument(
+            "--env",
+            type=str,
+            default=None,
+            help=f"MontyCloud environment, overrides api.base_url ({', '.join(environments.ENVIRONMENTS)})",
+        )
+        parser.add_argument(
+            "--report-name",
+            type=str,
+            default=None,
+            help="Custom report name segment (custom_<name>_<timestamp>.html), overrides report.report_name",
+        )
 
     @events.init.add_listener
     def _configure(environment, **_kwargs) -> None:
         opts = getattr(environment, "parsed_options", None)
         path = Path(getattr(opts, "mc_config", None) or default_config)
-        user_cls.configure(config_cls.load_file(path))
-        logger.info("Loaded scenario config %s", path)
+        env = getattr(opts, "env", None)
+        cfg = config_cls.load_file(path).with_overrides(env=env, report_name=getattr(opts, "report_name", None))
+        if env and environments.is_production(env):
+            logger.warning("--env %s is PRODUCTION (%s).", env, cfg.api.base_url)
+        user_cls.configure(cfg)
+        logger.info("Loaded scenario config %s → %s", path, cfg.api.base_url)
 
     install_single_journey_watchdog(lambda: user_cls.cfg is not None and user_cls.cfg.load.is_single_journey)
-    install_report_on_stop(lambda: user_cls.cfg)
+    install_report_on_stop(lambda: user_cls.cfg, user_cls.report_extras)
 
 
 def install_single_journey_watchdog(is_single_journey: Callable[[], bool]) -> None:
@@ -86,7 +104,10 @@ def install_single_journey_watchdog(is_single_journey: Callable[[], bool]) -> No
         gevent.spawn(_quit_when_all_users_done)
 
 
-def install_report_on_stop(get_config: Callable[[], ScenarioConfig | None]) -> None:
+def install_report_on_stop(
+    get_config: Callable[[], ScenarioConfig | None],
+    get_extras: Callable[[str], dict] = lambda _prefix: {},
+) -> None:
     """Write the custom HTML report when the run was started with --csv."""
 
     @events.test_stop.add_listener
@@ -116,6 +137,7 @@ def install_report_on_stop(get_config: Callable[[], ScenarioConfig | None]) -> N
                 description=cfg.report.description if cfg else "",
                 config_data=cfg.raw if cfg else None,
                 report_name=cfg.report.report_name if cfg else "",
+                **get_extras(csv_prefix),
             )
             logger.info("Custom HTML report  →  %s", out)
         except Exception as exc:

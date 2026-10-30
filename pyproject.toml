@@ -26,9 +26,9 @@ testpaths = ["tests"]
 markers = ["e2e: runs Locust against a local mock API (slower, ~20s)"]
 
 [tool.ruff]
-line-length = 110
+line-length = 120
 target-version = "py310"
-extend-exclude = ["archive", "API Performance test", "Security_bot", "knowledgebase"]
+extend-exclude = ["archive", "Security_bot", "knowledgebase"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP"]

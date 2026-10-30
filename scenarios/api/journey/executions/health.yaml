@@ -1,18 +1,18 @@
-# Chat query sweep manifest — consumed by run_chat_executions.py
+# Chat query sweep manifest — consumed by python -m mcperf.runners.chat_sweep
 #
-# Runs the same Locust chat test multiple times back-to-back with a different
-# chat_queries file (and optionally a different description) each time, while
-# keeping users/concurrency identical across every run. config.yaml itself is
-# never permanently changed — run_chat_executions.py overwrites it per-run and
-# restores the original content once the whole sweep finishes.
+# Runs the journey scenario back-to-back with a different chat queries file
+# (and optionally a different description) each time, keeping users and
+# concurrency identical. Each run gets its own generated config passed with
+# --mc-config; the scenario's config.yaml is never modified.
 #
-# Paths under `queries_file` are resolved the same way config.yaml's
-# `chat.queries_file` normally is: relative to this "API Performance test/"
-# directory (or absolute).
+# `queries_file` paths resolve against the base config's folder
+# (scenarios/api/journey/), or are absolute.
+#
+#   python -m mcperf.runners.chat_sweep --manifest scenarios/api/journey/executions/health.yaml
 
 # Shared across every execution in this sweep ("users remain the same").
 # NOTE: users.csv must have at least `users` rows of distinct credentials —
-# config.yaml's test.user_count must also be >= this value (see README's
+# config.yaml's load.user_count must also be >= this value (see README's
 # "user_count vs --users" table) so each concurrent user gets a unique login.
 run:
   users: 1
