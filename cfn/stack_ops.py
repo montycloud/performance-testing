@@ -145,6 +145,7 @@ def list_framework_stacks(
         "CREATE_COMPLETE", "CREATE_IN_PROGRESS", "CREATE_FAILED",
         "UPDATE_COMPLETE", "UPDATE_IN_PROGRESS",
         "ROLLBACK_COMPLETE", "UPDATE_ROLLBACK_COMPLETE",
+        "DELETE_FAILED",
     ]
     paginator = cfn.get_paginator("list_stacks")
     for page in paginator.paginate(StackStatusFilter=status_filter):

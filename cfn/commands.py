@@ -28,12 +28,13 @@ from cfn.stack_ops import (
 from cfn.templates import TEMPLATE_GENERATORS
 
 
-def cmd_create(cfg: dict) -> None:
+def cmd_create(cfg: dict, profile: str | None = None) -> None:
     prefix = cfg["global"]["prefix"]
     region = cfg["global"]["region"]
     s3_bucket = cfg["global"]["s3_bucket"]
-    cfn = boto3.client("cloudformation", region_name=region)
-    s3_client = boto3.client("s3", region_name=region)
+    session = boto3.Session(profile_name=profile, region_name=region)
+    cfn = session.client("cloudformation")
+    s3_client = session.client("s3")
 
     for resource_type, settings in cfg["resources"].items():
         if not settings.get("enabled") or settings.get("count", 0) == 0:
@@ -100,7 +101,7 @@ def cmd_create(cfg: dict) -> None:
     print("\nDone.")
 
 
-def cmd_scale(cfg: dict, resource_type: str, add: int) -> None:
+def cmd_scale(cfg: dict, resource_type: str, add: int, profile: str | None = None) -> None:
     if resource_type not in cfg["resources"]:
         sys.exit(f"Unknown resource: {resource_type}")
     if resource_type not in TEMPLATE_GENERATORS:
@@ -109,8 +110,9 @@ def cmd_scale(cfg: dict, resource_type: str, add: int) -> None:
     prefix = cfg["global"]["prefix"]
     region = cfg["global"]["region"]
     s3_bucket = cfg["global"]["s3_bucket"]
-    cfn = boto3.client("cloudformation", region_name=region)
-    s3_client = boto3.client("s3", region_name=region)
+    session = boto3.Session(profile_name=profile, region_name=region)
+    cfn = session.client("cloudformation")
+    s3_client = session.client("s3")
 
     deployed = list_framework_stacks(cfn, prefix, resource_type)
     current_max = max((s["end"] for s in deployed), default=0)
@@ -146,10 +148,11 @@ def cmd_scale(cfg: dict, resource_type: str, add: int) -> None:
     print(f"\nUpdated config count for {resource_type}: {new_end}")
 
 
-def cmd_delete(cfg: dict, resource_type: str | None, delete_all: bool) -> None:
+def cmd_delete(cfg: dict, resource_type: str | None, delete_all: bool, profile: str | None = None) -> None:
     prefix = cfg["global"]["prefix"]
     region = cfg["global"]["region"]
-    cfn = boto3.client("cloudformation", region_name=region)
+    session = boto3.Session(profile_name=profile, region_name=region)
+    cfn = session.client("cloudformation")
 
     stacks = list_framework_stacks(cfn, prefix, None if delete_all else resource_type)
     names = [s["name"] for s in stacks]
@@ -188,10 +191,11 @@ def cmd_delete(cfg: dict, resource_type: str | None, delete_all: bool) -> None:
     print("Done.")
 
 
-def cmd_status(cfg: dict) -> None:
+def cmd_status(cfg: dict, profile: str | None = None) -> None:
     prefix = cfg["global"]["prefix"]
     region = cfg["global"]["region"]
-    cfn = boto3.client("cloudformation", region_name=region)
+    session = boto3.Session(profile_name=profile, region_name=region)
+    cfn = session.client("cloudformation")
 
     stacks = list_framework_stacks(cfn, prefix)
     if not stacks:
