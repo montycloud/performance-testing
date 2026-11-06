@@ -3,11 +3,15 @@
 MontyCloud API Performance Test
 =================================
 Locust scenario that simulates the full user journey:
-  Sign-in  →  Home Page (5 sequential batches)  →  WAFR Page (4 sequential batches)
+  Sign-in  →  Home Page (7 sequential batches)  →  WAFR Page (4 sequential batches)
 
 Within each batch, all HTTP calls are fired in parallel using gevent greenlets.
 Batches are strictly sequential: each batch waits for 100 % of its calls to
 complete before the next batch starts.
+
+Home Page and WAFR Page can each be independently toggled on/off via
+`homepage.enabled` / `wafr.enabled` in config.yaml (both default true,
+preserving today's behaviour).
 
 Usage (headless — recommended):
     locust -f locustfile.py --headless \\
@@ -100,6 +104,17 @@ _ITERATIONS: int = max(1, int(_test_cfg.get("iterations", 1)))
 #              today's behaviour exactly (Home Page + WAFR only).
 #   mode     - "appended"  : Signin -> Home Page -> WAFR -> think time -> Health
 #              "standalone": Signin -> think time -> Health (skips Home/WAFR)
+
+# Home Page / WAFR toggles (config sections: `homepage`, `wafr`). Both
+# default True so existing configs without these sections keep running
+# exactly as before. When disabled, that flow's `_xxx_flow()` call is simply
+# skipped in full_journey() — the standalone Health/Chat branches below are
+# unaffected since they already bypass Home Page/WAFR regardless.
+_homepage_cfg: Dict[str, Any] = CFG.get("homepage", {}) or {}
+_HOMEPAGE_ENABLED: bool = bool(_homepage_cfg.get("enabled", True))
+_wafr_cfg: Dict[str, Any] = CFG.get("wafr", {}) or {}
+_WAFR_ENABLED: bool = bool(_wafr_cfg.get("enabled", True))
+
 _health_cfg: Dict[str, Any] = CFG.get("health", {}) or {}
 _HEALTH_ENABLED: bool = bool(_health_cfg.get("enabled", False))
 _HEALTH_MODE: str = str(_health_cfg.get("mode", "appended")).strip().lower()
@@ -346,6 +361,12 @@ class MontyCloudUser(HttpUser):
                           ``iterations`` is ignored.
                           Use with: --users N --run-time <duration>
 
+        Home Page and WAFR Page are independently gated by ``homepage.enabled``
+        and ``wafr.enabled`` in config.yaml (both default True). When disabled,
+        that flow's batches are skipped entirely; this does not affect the
+        Health/Chat ``standalone`` branches below, which already bypass
+        Home Page/WAFR regardless of these toggles.
+
         The Health Events flow is controlled by ``health`` in config.yaml:
 
           enabled=False              Home Page + WAFR only (default; unchanged
@@ -381,10 +402,16 @@ class MontyCloudUser(HttpUser):
             gevent.sleep(random.uniform(_THINK_MIN, _THINK_MAX))
             self._health_flow()
         else:
-            self._homepage_flow()
-            # Variable think time simulating the user pausing before navigating to WAFR
-            gevent.sleep(random.uniform(_THINK_MIN, _THINK_MAX))
-            self._wafr_flow()
+            _ran_any = False
+            if _HOMEPAGE_ENABLED:
+                self._homepage_flow()
+                _ran_any = True
+            if _WAFR_ENABLED:
+                if _ran_any:
+                    # Variable think time simulating the user pausing before navigating to WAFR
+                    gevent.sleep(random.uniform(_THINK_MIN, _THINK_MAX))
+                self._wafr_flow()
+                _ran_any = True
             if _HEALTH_ENABLED:
                 # Appended mode: another think time before drilling into Health.
                 gevent.sleep(random.uniform(_THINK_MIN, _THINK_MAX))
@@ -405,7 +432,7 @@ class MontyCloudUser(HttpUser):
             )
 
     # ------------------------------------------------------------------
-    # Home Page flow  (Batches 1 → 5)
+    # Home Page flow  (Batches 1 → 7)
     # ------------------------------------------------------------------
 
     def _homepage_flow(self) -> None:
@@ -413,22 +440,31 @@ class MontyCloudUser(HttpUser):
 
         # ── Batch 1 ── (1 call) ──────────────────────────────────────
         self._run_batch([
+            lambda: self._get("/org/organizations/", "[HomePage] /org/organizations/"),
+        ])
+
+        # ── Batch 2 ── (1 call, fires after Batch 1) ─────────────────
+        self._run_batch([
             lambda: self._get("/auth/user", "[HomePage] /auth/user"),
         ])
 
-        # ── Batch 2 ── (2 calls, fires after Batch 1) ────────────────
+        # ── Batch 3 ── (1 call, fires after Batch 2) ─────────────────
+        # /auth/user dropped here — already covered by Batch 2 (no longer
+        # duplicated per the updated PRD).
         self._run_batch([
             lambda: self._get("/org/customer-preference",  "[HomePage] /org/customer-preference"),
-            lambda: self._get("/auth/user",                "[HomePage] /auth/user"),
         ])
 
-        # ── Batch 3 ── (15 calls, fires after Batch 2) ───────────────
-        # Capture `org` in default args to avoid late-binding surprises
+        # ── Batch 4 ── (8 calls, fires after Batch 3) ────────────────
+        # Main "landing" burst after org load.
+        # Capture `org` in default args to avoid late-binding surprises.
+        # Note: /customeraccount/logo is intentionally NOT included — it
+        # frequently returns non-JSON content and pollutes failure stats.
+        # /org/organizations/ dropped here — already covered by Batch 1 (no
+        # longer duplicated per the updated PRD).
         self._run_batch([
             lambda: self._get("/auth/organizations",
                               "[HomePage] /auth/organizations"),
-            lambda: self._get("/customeraccount/logo",
-                              "[HomePage] /customeraccount/logo"),
             lambda: self._get(
                 "/customeraccount/api/v1/faa-roles/configured-accounts",
                 "[HomePage] /customeraccount/api/v1/faa-roles/configured-accounts",
@@ -439,12 +475,11 @@ class MontyCloudUser(HttpUser):
                 "[HomePage] /notifications",
                 params={"pageNumber": 1, "pageSize": 25},
             ),
-            lambda: self._get("/auth/organizations",
-                              "[HomePage] /auth/organizations"),
-            lambda: self._get("/org/organizations/",
-                              "[HomePage] /org/organizations/"),
-            lambda: self._get("/v1/mc/list-regions",
-                              "[HomePage] /v1/mc/list-regions"),
+            lambda: self._get(
+                "/notifications",
+                "[HomePage] /notifications",
+                params={"pageSize": 25, "pageNumber": 1},
+            ),
             lambda: self._get(
                 "/resource/regions",
                 "[HomePage] /resource/regions",
@@ -452,27 +487,28 @@ class MontyCloudUser(HttpUser):
             ),
             lambda: self._get("/auth/user-data",
                               "[HomePage] /auth/user-data"),
-            lambda: self._get(
-                "/notifications",
-                "[HomePage] /notifications",
-                params={"pageSize": 25, "pageNumber": 1},
-            ),
             lambda: self._get("/auth/portal/users",
                               "[HomePage] /auth/portal/users"),
-            lambda: self._get("/subscription/product-catalog",
-                              "[HomePage] /subscription/product-catalog"),
-            lambda: self._get("/subscription/product-catalog",
-                              "[HomePage] /subscription/product-catalog"),
             # Uses OrganizationId from on_start; `org` captured at batch definition time
             lambda _org=org: self._get(
                 f"/org/organization/{_org}",
                 "[HomePage] /org/organization/{id}",
             ),
+        ])
+
+        # ── Batch 5 ── (2 calls, fires after Batch 4) ────────────────
+        # Endpoints not covered by the PRD's Batch 1–7 list but exercised by
+        # the real homepage; kept in their own batch so they stay isolated
+        # from the PRD-defined batches above/below. Duplicate
+        # /subscription/product-catalog calls removed (kept once).
+        self._run_batch([
+            lambda: self._get("/v1/mc/list-regions",
+                              "[HomePage] /v1/mc/list-regions"),
             lambda: self._get("/subscription/product-catalog",
                               "[HomePage] /subscription/product-catalog"),
         ])
 
-        # ── Batch 4 ── (2 calls, fires after Batch 3) ────────────────
+        # ── Batch 6 ── (2 calls, fires after Batch 5) ────────────────
         self._run_batch([
             lambda _org=org: self._get(
                 "/org/resources",
@@ -496,7 +532,7 @@ class MontyCloudUser(HttpUser):
             ),
         ])
 
-        # ── Batch 5 ── (7 calls, fires after Batch 4) ────────────────
+        # ── Batch 7 ── (7 calls, fires after Batch 6) ────────────────
         self._run_batch([
             lambda: self._get(
                 "/cost/cost-dashboard",

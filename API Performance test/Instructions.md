@@ -24,7 +24,7 @@ python3 -m locust -f locustfile.py --headless --users N --spawn-rate R \
 | File | Responsibility |
 |---|---|
 | `locustfile.py` | Everything: config/CSV bootstrap at module load, the `MontyCloudUser` class, all flow methods, and the `on_test_stop` hook that auto-generates the custom HTML report. |
-| `config.yaml` | All tunables — API base URL, users CSV path, run mode/iterations, think times, and per-flow `health:`/`chat:` sections (`enabled`/`mode` toggles). |
+| `config.yaml` | All tunables — API base URL, users CSV path, run mode/iterations, think times, per-flow `homepage:`/`wafr:` toggles (`enabled` only), and `health:`/`chat:` sections (`enabled`/`mode` toggles). |
 | `report_generator.py` | Reads Locust's `--csv` stats output and renders a sectioned custom HTML report (`reports/custom_<name>_<ts>.html`), bucketing rows by their `[Prefix]` in the request `name`. |
 | `users.csv` | Test user credentials (`Name,Email,Password,New Password,Tenant`). The `Tenant` column is no longer read by the Chat flow. |
 | `chat_queries.txt` | Plain-text prompts for the Chat flow, one per line. |
@@ -44,10 +44,13 @@ and `report_generator.py` can bucket them into sections.
 
 1. **`_signin()`** — always runs once per user (`on_start`), `POST /auth/signin`
    then `GET /auth/user` to capture `self._token` and `self._org_id`.
-2. **`_homepage_flow()`** — 5 sequential batches, calls within a batch fire in
-   parallel via `gevent.pool.Group` (see `_run_batch`).
+2. **`_homepage_flow()`** — 7 sequential batches, calls within a batch fire in
+   parallel via `gevent.pool.Group` (see `_run_batch`). Gated by
+   `homepage.enabled` in `config.yaml` (default `true`); when `false`,
+   `full_journey()` skips this call entirely.
 3. **`_wafr_flow()`** — 4 sequential batches; fetches a `WorkloadId` in batch 1
-   and reuses it in the rest.
+   and reuses it in the rest. Gated by `wafr.enabled` in `config.yaml`
+   (default `true`); when `false`, `full_journey()` skips this call entirely.
 4. **`_health_flow()`** — optional (`health.enabled`), `health.mode` is
    `appended` (tacked on after Home/WAFR) or `standalone` (skips Home/WAFR).
 5. **`_chat_flow()`** — optional (`chat.enabled`), WebSocket-based, same

@@ -2,7 +2,9 @@
 
 Locust-based performance test that simulates the full user journey:
 
-**Sign-in → Home Page (5 sequential batches) → WAFR Page (4 sequential batches) → (optional) Health Events**
+**Sign-in → Home Page (7 sequential batches) → WAFR Page (4 sequential batches) → (optional) Health Events**
+
+Home Page and WAFR Page can each be independently toggled on/off via `homepage.enabled` / `wafr.enabled` (both default `true`).
 
 Within each batch all HTTP calls fire in parallel; batches are strictly sequential.
 
@@ -46,6 +48,8 @@ cp .env.example .env
 | `test.spawn_rate` | `50` | Informational only (shown in report); set actual value via `--spawn-rate` |
 | `test.run_time` | `5m` | Informational only (shown in report); set actual value via `--run-time` |
 | `test.iterations` | `20` | Journeys per user in `single_journey` mode; ignored in `timed` mode |
+| `homepage.enabled` | `true` | Whether the Home Page flow (7 batches) runs at all |
+| `wafr.enabled` | `true` | Whether the WAFR Page flow runs at all |
 | `health.enabled` | `false` | Whether the Health Events flow runs at all |
 | `health.mode` | `appended` | `appended` (Home Page → WAFR → think time → Health) or `standalone` (Signin → think time → Health only) |
 | `chat.enabled` | `false` | Whether the Chat (WebSocket) flow runs at all |
