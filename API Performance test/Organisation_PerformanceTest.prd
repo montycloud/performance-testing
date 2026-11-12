@@ -1,0 +1,33 @@
+1. We need to modify the current homepage API endpoint into batches as mentioned in point 3
+2. Create a toggle for both home page and create a toggle for WAFR. The home page and Org can be enabled or disabled from config.
+3. Below are the API endpoints which we need to automate in batches mentioned
+Batch 1
+GET /org/organizations/
+Batch 2
+GET /auth/user
+Batch 3 (2 parallel)
+GET /org/customer-preference
+Batch 4(11 parallel — main "landing" burst after org load)
+GET /auth/organizations 
+GET /customeraccount/logo
+GET /customeraccount/api/v1/faa-roles/configured-accounts?PageNumber=1&PageSize=500
+GET /notifications?pageNumber=1&pageSize=25
+GET /notifications?pageSize=25&pageNumber=1
+GET /resource/regions?CloudProvider=Azure
+GET /auth/user-data
+GET /auth/portal/users
+GET /org/organization/{orgId}
+Batch 5 (2 parallel)
+GET /org/resources?Filters={"Orgs":["{orgId}"],"Detail":true,"ResourceType":"CustomerAccount"}&CloudProvider=Azure
+GET /org/resources?Filters={"Orgs":["{orgId}"],"Detail":true,"ResourceType":"CustomerAccount"}&CloudProvider=AWS
+Batch 6 (7 parallel — cost/optimization dashboard widgets)
+GET /cost/cost-dashboard?CloudProvider=AWS
+GET /cost/cost-dashboard/lookup?CloudProvider=AWS
+GET /optimizations/api/v1/aws/cost/opportunities/Saving/service-type/top-n?Tenure=Monthly&Count=5&PaymentTerm=ri_sp_1y_all_upf
+GET /optimizations/api/v1/aws/cost/overview-summary?Tenure=Monthly&PaymentTerm=ri_sp_1y_all_upf
+GET /org/resource-governance-summary?CloudProvider=AWS
+GET /org/inventory-summary?CloudProvider=AWS&SummaryType=by-region
+GET /org/inventory-summary?CloudProvider=AWS&SummaryType=by-resourcetype
+4. Have a look at locust performance tests and report generation with appropriate end time between batches
+5. Make sure none of the existing API endpoints are broken
+6. The number of parallel users, timed, iterations, single_journey will remain similar to other API tests in the current folder
