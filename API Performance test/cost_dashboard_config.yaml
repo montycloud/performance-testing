@@ -97,3 +97,14 @@ cost_dashboard:
 
   # Query params for the Batch 4 spend-breakdown-summary / resource-count calls.
   breakdown_limit: 25
+
+  # v2 (Redshift Data API POC, see montycloud/montycloud#13689 / MCPLAT-35131).
+  # When enabled, fires a v2 call alongside every v1 call that has a v2
+  # counterpart (cost-dashboard, cost-summary, resource-summary, spend-trend,
+  # spend-breakdown-summary) — same filters/params, same request, same batch
+  # — so the custom HTML report can show v1 vs v2 timings side by side for
+  # direct A/B comparison. Endpoints with no v2 counterpart (lookup,
+  # region-summary, cost-by-charge-type, lookup-tag-keys, resource-count) are
+  # unaffected. Default false: zero impact on existing v1-only runs/reports.
+  v2:
+    enabled: true

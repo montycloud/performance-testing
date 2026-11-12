@@ -20,6 +20,10 @@ HAR-derived design notes):
   Batch 4  — "Spend Trend" tab widgets: spend-trend, spend-breakdown-summary,
              resource-count (parallel, 3 calls) — fired once per date-range preset.
 
+v2 (optional, `cost_dashboard.v2.enabled`): fires the Redshift Data API v2
+  counterparts (MCPLAT-35131) alongside their v1 calls, named "<name> (v2)",
+  for direct A/B comparison in the custom HTML report.
+
 This file intentionally does NOT touch locustfile.py/config.yaml — it is a
 fully separate test with its own config (cost_dashboard_config.yaml) and its
 own users_csv, sharing only common.py's helpers.
@@ -109,6 +113,15 @@ if not _DATE_RANGE_PRESETS:
         "— at least one preset ({label, days_back}) is required."
     )
 
+# v2 (Redshift Data API POC — MCPLAT-35131). Same request/response schema as
+# v1, only the path changes.
+_V2_ENABLED: bool = bool((_cd_cfg.get("v2", {}) or {}).get("enabled", False))
+_V2_PATH_COST_DASHBOARD = "/cost/cost-dashboard/v2"
+_V2_PATH_COST_SUMMARY = "/cost/cost-dashboard/cost-summary/v2"
+_V2_PATH_RESOURCE_SUMMARY = "/cost/cost-dashboard/resource-summary/v2"
+_V2_PATH_SPEND_TREND = "/cost/cost-dashboard/spend-trend/v2"
+_V2_PATH_SPEND_BREAKDOWN_SUMMARY = "/cost/cost-dashboard/spend-breakdown-summary/v2"
+
 
 def _date_range(days_back: int) -> Dict[str, str]:
     """Return {StartDate, EndDate} as YYYY-MM-DD strings, EndDate = today."""
@@ -195,14 +208,21 @@ class CostDashboardUser(HttpUser):
 
     def _cost_dashboard_flow(self) -> None:
         # ── Batch 1 ── Dashboard bootstrap (2 calls, parallel) ───────────
-        self._run_batch([
+        batch1_calls = [
             lambda: self._get("/cost/cost-dashboard",
                               "[Cost] cost-dashboard",
                               params={"CloudProvider": "AWS"}),
             lambda: self._get("/cost/cost-dashboard/lookup",
                               "[Cost] lookup",
                               params={"CloudProvider": "AWS"}),
-        ])
+        ]
+        if _V2_ENABLED:
+            batch1_calls.append(
+                lambda: self._get(_V2_PATH_COST_DASHBOARD,
+                                  "[Cost] cost-dashboard (v2)",
+                                  params={"CloudProvider": "AWS"}),
+            )
+        self._run_batch(batch1_calls)
         gevent.sleep(random.uniform(_BATCH_THINK_MIN, _BATCH_THINK_MAX))
 
         # ── Batch 2 ── "Total Spend" widgets, once per date-range preset ──
@@ -230,6 +250,14 @@ class CostDashboardUser(HttpUser):
                     params={"Filters": json.dumps(filters), "CloudProvider": "AWS"},
                 )
 
+            def _cost_summary_v2(summary_type: str, _base=base_filters):
+                filters = {"SummaryType": summary_type, **_base}
+                return self._get(
+                    _V2_PATH_COST_SUMMARY,
+                    f"[Cost] cost-summary ({summary_type}) (v2)",
+                    params={"Filters": json.dumps(filters), "CloudProvider": "AWS"},
+                )
+
             def _spend_trend(_base=base_filters):
                 filters = {"SummaryType": "by-account", **_base}
                 return self._get(
@@ -238,7 +266,15 @@ class CostDashboardUser(HttpUser):
                     params={"Filters": json.dumps(filters), "CloudProvider": "AWS"},
                 )
 
-            self._run_batch([
+            def _spend_trend_v2(_base=base_filters):
+                filters = {"SummaryType": "by-account", **_base}
+                return self._get(
+                    _V2_PATH_SPEND_TREND,
+                    "[Cost] spend-trend (v2)",
+                    params={"Filters": json.dumps(filters), "CloudProvider": "AWS"},
+                )
+
+            batch2_calls = [
                 lambda _st="by-account": _cost_summary(_st),
                 lambda _st="by-service": _cost_summary(_st),
                 lambda _base=base_filters: self._get(
@@ -257,7 +293,19 @@ class CostDashboardUser(HttpUser):
                     "[Cost] cost-by-charge-type",
                     params={"Filters": json.dumps(_base), "CloudProvider": "AWS"},
                 ),
-            ])
+            ]
+            if _V2_ENABLED:
+                batch2_calls += [
+                    lambda _st="by-account": _cost_summary_v2(_st),
+                    lambda _st="by-service": _cost_summary_v2(_st),
+                    lambda _base=base_filters: self._get(
+                        _V2_PATH_RESOURCE_SUMMARY,
+                        "[Cost] resource-summary (v2)",
+                        params={"Filters": json.dumps(_base), "CloudProvider": "AWS"},
+                    ),
+                    lambda: _spend_trend_v2(),
+                ]
+            self._run_batch(batch2_calls)
             gevent.sleep(random.uniform(_CD_THINK_MIN, _CD_THINK_MAX))
 
         # ── Batch 3 ── tag-keys lookup (single call) ──────────────────────
@@ -279,7 +327,7 @@ class CostDashboardUser(HttpUser):
             trend_filters = {"SummaryType": "by-account", **base_filters}
             breakdown_filters = {**base_filters, "SummaryType": "by-account"}
 
-            self._run_batch([
+            batch4_calls = [
                 lambda _f=trend_filters: self._get(
                     "/cost/cost-dashboard/spend-trend",
                     "[Cost] spend-trend-tab",
@@ -301,7 +349,24 @@ class CostDashboardUser(HttpUser):
                         "Limit": _BREAKDOWN_LIMIT, "Offset": 0, "CloudProvider": "AWS",
                     },
                 ),
-            ])
+            ]
+            if _V2_ENABLED:
+                batch4_calls += [
+                    lambda _f=trend_filters: self._get(
+                        _V2_PATH_SPEND_TREND,
+                        "[Cost] spend-trend-tab (v2)",
+                        params={"Filters": json.dumps(_f), "CloudProvider": "AWS"},
+                    ),
+                    lambda _f=breakdown_filters: self._get(
+                        _V2_PATH_SPEND_BREAKDOWN_SUMMARY,
+                        "[Cost] spend-breakdown-summary (v2)",
+                        params={
+                            "Filters": json.dumps(_f),
+                            "Limit": _BREAKDOWN_LIMIT, "Offset": 0, "CloudProvider": "AWS",
+                        },
+                    ),
+                ]
+            self._run_batch(batch4_calls)
             gevent.sleep(random.uniform(_CD_THINK_MIN, _CD_THINK_MAX))
 
 

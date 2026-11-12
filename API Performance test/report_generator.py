@@ -135,6 +135,21 @@ _COST_GROUPS: List[Tuple[str, List[str]]] = [
     ]),
 ]
 
+# v1 vs v2 comparison pairs (v2 = Redshift Data API POC, MCPLAT-35131).
+# (friendly label, v1 row name, v2 row name).
+_V1_V2_PAIRS: List[Tuple[str, str, str]] = [
+    ("cost-dashboard", "[Cost] cost-dashboard", "[Cost] cost-dashboard (v2)"),
+    ("cost-summary (by-account)",
+     "[Cost] cost-summary (by-account)", "[Cost] cost-summary (by-account) (v2)"),
+    ("cost-summary (by-service)",
+     "[Cost] cost-summary (by-service)", "[Cost] cost-summary (by-service) (v2)"),
+    ("resource-summary", "[Cost] resource-summary", "[Cost] resource-summary (v2)"),
+    ("spend-trend", "[Cost] spend-trend", "[Cost] spend-trend (v2)"),
+    ("spend-trend-tab", "[Cost] spend-trend-tab", "[Cost] spend-trend-tab (v2)"),
+    ("spend-breakdown-summary",
+     "[Cost] spend-breakdown-summary", "[Cost] spend-breakdown-summary (v2)"),
+]
+
 
 # ---------------------------------------------------------------------------
 # HTML builders
@@ -224,6 +239,47 @@ def _cost_grouped_summary_html(cost_rows: List[Dict[str, str]]) -> str:
     )
 
 
+def _v2_comparison_html(cost_rows: List[Dict[str, str]]) -> str:
+    """Render a v1-vs-v2 comparison table (see _V1_V2_PAIRS). Only pairs
+    where both rows are present are shown; "" if v2 wasn't run."""
+    by_name = {r.get(_COL_NAME, ""): r for r in cost_rows}
+    tbody_rows: List[str] = []
+    for label, v1_name, v2_name in _V1_V2_PAIRS:
+        v1_row, v2_row = by_name.get(v1_name), by_name.get(v2_name)
+        if not v1_row or not v2_row:
+            continue
+        try:
+            v1_avg = float(v1_row.get(_COL_AVG, 0) or 0)
+            v2_avg = float(v2_row.get(_COL_AVG, 0) or 0)
+        except (ValueError, TypeError):
+            continue
+        delta_ms = v2_avg - v1_avg
+        delta_pct = (delta_ms / v1_avg * 100) if v1_avg else 0.0
+        if delta_pct <= -1:
+            delta_cls, delta_label = ' class="improved"', "faster"
+        elif delta_pct >= 1:
+            delta_cls, delta_label = ' class="fail"', "slower"
+        else:
+            delta_cls, delta_label = "", "~same"
+        tbody_rows.append(
+            f"<tr><td class='name'>{label}</td>"
+            f"<td>{_fmt(v1_row.get(_COL_AVG))}</td>"
+            f"<td>{_fmt(v2_row.get(_COL_AVG))}</td>"
+            f"<td{delta_cls}>{delta_ms:+,.1f} ms ({delta_pct:+.1f}%, {delta_label})</td>"
+            f"<td>{_fail_pct(v1_row)}</td><td>{_fail_pct(v2_row)}</td></tr>"
+        )
+    if not tbody_rows:
+        return ""
+    return (
+        "<h3 style='margin:20px 0 10px;font-size:.9rem;color:#1a2b3c;'>"
+        "v1 vs v2 Comparison (MCPLAT-35131)</h3>"
+        "<div class='table-wrap'>"
+        "<table><thead><tr><th>Endpoint</th><th>v1 Avg (ms)</th><th>v2 Avg (ms)</th>"
+        "<th>&Delta; (v2 - v1)</th><th>v1 Failure %</th><th>v2 Failure %</th></tr></thead>"
+        f"<tbody>{''.join(tbody_rows)}</tbody></table></div>"
+    )
+
+
 def _cost_section_html(cost_rows: List[Dict[str, str]]) -> str:
     """Render the full Cost Dashboard section: grouped summary + all endpoints.
 
@@ -239,14 +295,17 @@ def _cost_section_html(cost_rows: List[Dict[str, str]]) -> str:
         f"avg {totals['avg_rt']} &nbsp;\u00b7&nbsp; {totals['fail_pct']} failures"
     )
     grouped_html = _cost_grouped_summary_html(cost_rows)
+    comparison_html = _v2_comparison_html(cost_rows)
     return (
         "<section>"
         f'<div class="section-title cost">Cost Dashboard {badge}{meta}</div>'
         f"{grouped_html}"
+        f"{comparison_html}"
         "<h3 style='margin:20px 0 10px;font-size:.9rem;color:#1a2b3c;'>All Endpoints</h3>"
         f"{_table_html(cost_rows, 'No [Cost] data found.')}"
         "</section>"
     )
+
 
 
 def _card(label: str, value: str, sub: str = "") -> str:
@@ -473,6 +532,7 @@ tbody td { padding: 9px 13px; border-bottom: 1px solid #e5e7eb;
            white-space: nowrap; }
 td.name { white-space: normal; max-width: 360px; font-weight: 500; color: #1a2b3c; }
 td.fail { color: #dc2626; font-weight: 700; }
+td.improved { color: #16a34a; font-weight: 700; }
 
 .empty { color: #888; font-style: italic; padding: 12px 0; }
 footer { text-align: center; color: #aaa; font-size: .75rem; padding: 28px; }
