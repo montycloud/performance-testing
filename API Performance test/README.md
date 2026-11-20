@@ -38,7 +38,9 @@ cp .env.example .env
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `api.base_url` | `https://stg1-api.montycloud.com` | Target API environment |
+| `api.environments` | `dev1`/`qa`/`stg1` map | Named environments selectable via `--env <key>` on any of the three locustfiles (`locustfile.py`, `cost_dashboard_locustfile.py`, `inventory_locustfile.py`) |
+| `api.default_env` | `stg1` | Environment used when `--env` is omitted |
+| `api.base_url` | `https://stg1-api.montycloud.com` | Legacy fallback, used only if `api.environments` is absent |
 | `api.mc_debug_mode` | `true` | Passed as `MC_DEBUG_MODE` in every signin payload |
 | `api.timeout_seconds` | `40` | Per-request timeout |
 | `test.users_csv` | `./users.csv` | Path to users CSV (relative to this directory or absolute) |
@@ -72,32 +74,59 @@ cp .env.example .env
 
 `inventory_locustfile.py` is a **separate, standalone** Locust scenario (its
 own file, own `HttpUser`, own `on_test_start`/`on_test_stop` hooks) covering
-the Inventory summary page: `GET /org/inventory-summary`. It reads the SAME
-`config.yaml` as `locustfile.py` — but only its own `inventory:` section —
-and shares sign-in/HTTP helpers with `cost_dashboard_locustfile.py` via
-`common.py`. It never runs as part of `MontyCloudUser`'s full journey.
+the Inventory page: `GET /org/inventory-summary`, `GET /org/resources`,
+`GET /org/resource-governance-summary`, `GET /org/resources_paginated`. It
+reads the SAME `config.yaml` as `locustfile.py` — but only its own
+`inventory:` section (plus the shared root `api:` block) — and shares
+sign-in/HTTP helpers with `cost_dashboard_locustfile.py` via `common.py`. It
+never runs as part of `MontyCloudUser`'s full journey.
 
-Flow per iteration: Signin → think time → Inventory Summary (`by-account` +
-`by-region` + `by-resourcetype`, parallel) → 1-3s pause.
+Flow per iteration (derived from HAR analysis of real UI traffic — see
+`inventory_Plan_additional_resources.md`):
+
+```
+Signin -> think time
+  -> Batch A (parallel, 5 calls): resources + inventory-summary x3 +
+     resource-governance-summary
+  -> batch think time
+  -> [for each inventory.filter_resource_types entry]:
+        Batch B (parallel, 3 calls) -- filter applied
+        -> batch think time
+        Batch C (parallel, 4 calls) -- filter cleared
+        -> batch think time
+  -> Batch D (sequential, 7 calls, 2-10s apart): one resources_paginated
+     call per hardcoded resource type (Instance, Image, Workspace,
+     NotebookInstance, Volume, Snapshot, S3)
+```
 
 ### Configuration — `config.yaml`'s `inventory:` section
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `api.base_url` | `https://stg1-api.montycloud.com` | Target API environment (shared with the main journey) |
+| `api.environments` / `api.default_env` | see root `api:` block | Target environment, selectable via `--env <key>` (shared with the main journey) |
 | `inventory.users_csv` / `inventory.user_count` | `./users.csv` / `1` | Self-contained — does not read the top-level `test:` block |
 | `inventory.iterations` | `5` | Journeys per user in `single_journey` mode |
-| `inventory.batch_think_time_min` / `max` | `1` / `3` | Pause after the Inventory batch |
+| `inventory.batch_think_time_min` / `max` | `1` / `3` | Pause after each Batch A/B/C |
+| `inventory.drilldown_think_time_min` / `max` | `2` / `10` | Pause after each sequential Batch D call |
 | `inventory.enabled` | `true` | Master toggle — set `false` to no-op the file |
 | `inventory.mode` | `standalone` | Only `standalone` is implemented today |
 | `inventory.cloud_provider` | `AWS` | Sent as `CloudProvider` on every call |
-| `inventory.batch_2_summary_types` | `[by-account, by-region, by-resourcetype]` | `SummaryType` values fired (single batch) |
+| `inventory.batch_2_summary_types` | `[by-account, by-region, by-resourcetype]` | `SummaryType` values fired in each inventory-summary batch |
+| `inventory.batch_a_enabled` | `true` | Whether Batch A includes `resources` + `resource-governance-summary` alongside the 3 summary calls |
+| `inventory.batch_a_org_resource_type` | `CustomerAccount` | `Filters.ResourceType` sent on the Batch A `GET /org/resources` call |
+| `inventory.filter_resource_types` | `[API, Snapshot]` | `ResourceType` values cycled through for Batch B/C — every entry runs every iteration, in order |
+
+Batch D's resource-type list (`Instance`, `Image`, `Workspace`,
+`NotebookInstance`, `Volume`, `Snapshot`, `S3`, each with its own
+`Limit`/`Offset`) is hardcoded as the `_DRILLDOWN_RESOURCE_TYPES` constant in
+`inventory_locustfile.py` rather than in `config.yaml`, since it's a fixed
+replication of the observed HAR sequence rather than a per-run tunable.
 
 ### Running the Inventory test
 
 ```bash
 python3 -m locust -f inventory_locustfile.py --headless \
-  --users 5 --spawn-rate 5 \
+  --users 5 --spawn-rate 5 --env qa \
   --html reports/inventory_report.html --csv reports/inventory_stats
 ```
 
@@ -135,6 +164,11 @@ The CSV must use the same column names as `Scripts/CreateChildUsers/users.csv`:
 
 Set `run_mode` in `config.yaml` to choose how users behave, then pick the
 matching command below.
+
+All examples below target the default environment (`api.default_env`,
+`stg1`). Pass `--env dev1` / `--env qa` / `--env stg1` to target a different
+one (same flag on `locustfile.py`, `cost_dashboard_locustfile.py`, and
+`inventory_locustfile.py`).
 
 ---
 
@@ -280,6 +314,25 @@ After the test completes, two reports are available:
 |--------|----------|-------------|
 | Locust HTML | `reports/locust_report.html` | Built-in Locust report with charts, percentiles, and per-endpoint tables |
 | Custom HTML | `reports/custom_report_<timestamp>.html` | Sectioned report: Auth / Home Page / WAFR Page / Health Events / Chat (Health and Chat sections are empty unless their `enabled: true`) |
+
+Locust also writes `<csv-prefix>_failures.csv` (e.g. `inventory_stats_failures.csv`)
+when `--csv` is passed, but it **aggregates** failures by (method, request
+name, error) with just an occurrence count — there's no room for the actual
+request URL, which can differ per occurrence (e.g. the same
+`inventory-summary (filtered)` name is reused across different
+`ResourceType` filter values, or `resources_paginated` across resource
+types). Alongside it, every locustfile that calls
+`common.attach_failure_detail_logger()` (currently `inventory_locustfile.py`)
+also writes `<csv-prefix>_failures_detail.csv` — **one row per failed
+request**, with the full request URL (query params included), status code,
+error, and a response-body snippet:
+
+| Timestamp | Method | Name | URL | StatusCode | Error | ResponseSnippet |
+|---|---|---|---|---|---|---|
+| 2026-11-18T09:30:58Z | GET | `[Inventory] resources_paginated (Volume)` | `https://.../org/resources_paginated?Filters=%7B...%7D&Limit=10` | 500 | `HTTP 500` | `Internal Server Error` |
+
+Use this file to reproduce a failing call directly (copy the `URL` column
+into curl/Postman) instead of cross-referencing logs.
 
 ### Generating the custom report manually
 
@@ -440,7 +493,8 @@ elapsed time since the query was sent. Leave it blank to disable.
 | `Signin failed: HTTP 401` | Wrong credentials in CSV | Verify `Email` + `New Password` columns |
 | `No WAFR workloads returned` | User has no PENDING workloads | Create workloads for test users or use a different environment |
 | Custom HTML report not generated | `--csv` flag not passed | Add `--csv reports/stats` to your Locust command |
-| Connection errors | Wrong `base_url` | Check `api.base_url` in `config.yaml` |
+| Connection errors | Wrong `base_url`, or wrong `--env` | Check `api.base_url`/`api.environments` in `config.yaml`, and the `--env` value passed on the command line |
+| `argument --env: invalid choice` | `--env` value isn't a key in `api.environments` | Use one of `dev1`/`qa`/`stg1` (or whatever keys are defined in `config.yaml`) |
 | `chat.ws_base_url is not configured` | `chat.enabled: true` but `ws_base_url` blank | Set `chat.ws_base_url` in `config.yaml` |
 | `No chat queries loaded` | `chat_queries.txt` missing or empty | Check `chat.queries_file` path and that the file has at least one non-comment line |
 | `No tenants loaded from Tenant.json` | `Tenant.json` is missing, empty, or has no entries with an `ID` | Check `chat.tenants_file` path and that `Tenant.json` has at least one valid entry |

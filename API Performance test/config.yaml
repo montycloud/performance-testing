@@ -1,5 +1,17 @@
 api:
-  # Base URL of the MontyCloud API (no trailing slash)
+  # Named environments, selectable at runtime via `--env <key>` on
+  # locustfile.py / cost_dashboard_locustfile.py / inventory_locustfile.py
+  # (cost_dashboard_locustfile.py reads its own api.environments/default_env
+  # from cost_dashboard_config.yaml, kept in sync with this block).
+  environments:
+    dev1: "https://dev-api.montycloud.com"
+    qa: "https://qa-us-api.montycloud.com"
+    stg1: "https://stg1-api.montycloud.com"
+  # Environment used when --env is omitted on the command line.
+  default_env: "stg1"
+  # Base URL of the MontyCloud API (no trailing slash). Kept as a fallback
+  # for any code path that still reads api.base_url directly; superseded by
+  # api.environments/--env wherever that's wired up.
   base_url: "https://stg1-api.montycloud.com"
   # Pass MC_DEBUG_MODE=true in every signin payload (bypasses CAPTCHA checks)
   mc_debug_mode: true
@@ -169,16 +181,38 @@ inventory:
   # implemented today (Signin -> think time -> Inventory).
   mode: "standalone"
 
-  # Cloud provider sent as CloudProvider on every /org/inventory-summary call.
+  # Cloud provider sent as CloudProvider on every /org/inventory-summary,
+  # /org/resources and /org/resource-governance-summary call.
   cloud_provider: "AWS"
 
-  # SummaryType values fired in the single Inventory batch (the "by-account"
-  # tab load, which fetches all three summary widgets together). Batch 1
-  # (by-region/by-resourcetype standalone) was dropped per confirmation.
+  # SummaryType values fired in each inventory-summary batch (Batch A/B/C —
+  # the "by-account" tab load, which fetches all three summary widgets
+  # together). Batch 1 (by-region/by-resourcetype standalone) was dropped
+  # per confirmation.
   batch_2_summary_types:
     - "by-account"
     - "by-region"
     - "by-resourcetype"
+
+  # Batch A — initial page load. Adds GET /org/resources (Filters.ResourceType
+  # below) and GET /org/resource-governance-summary alongside the 3
+  # inventory-summary calls above.
+  batch_a_enabled: true
+  batch_a_org_resource_type: "CustomerAccount"
+
+  # Batch B/C — filter apply/clear cycle. One Batch B (filter applied) +
+  # Batch C (filter cleared) pair per entry here, run every iteration, in
+  # order (not a random pick).
+  filter_resource_types:
+    - "API"
+    - "Snapshot"
+
+  # Batch D — think time (seconds) between each sequential resource-type
+  # drilldown call. The resource-type list itself is a fixed constant in
+  # inventory_locustfile.py (_DRILLDOWN_RESOURCE_TYPES), not configurable
+  # here, since it's a direct replication of the observed HAR sequence.
+  drilldown_think_time_min: 2
+  drilldown_think_time_max: 10
 
   # Path to the users CSV file (relative to this config file, or absolute).
   users_csv: "./users.csv"
@@ -198,8 +232,10 @@ inventory:
   # Human-readable description shown at the top of the HTML report.
   description: |
     Inventory API Performance Test
-    Standalone flow: Signin -> Inventory Summary (by-account + by-region +
-    by-resourcetype, parallel).
+    Standalone flow: Signin -> Batch A (resources + resource-governance-summary
+    + inventory-summary x3, parallel) -> per filter_resource_types entry:
+    Batch B (filter applied) -> Batch C (filter cleared) -> Batch D
+    (sequential resource-type drilldowns via resources_paginated).
     User count: 4 
 
   # Name used in the custom report filename: custom_<report_name>_<timestamp>.html
@@ -229,6 +265,7 @@ day2sdk_api:
   # or `--env stg` (defaults to default_env below when --env is omitted).
   environments:
     dev: "https://dev-api.montycloud.com"
+    qa: "https://qa-us-api.montycloud.com"
     stg: "https://stg1-api.montycloud.com"
   default_env: "stg"
 
@@ -259,21 +296,21 @@ day2sdk_api:
   # Deferred tags (not implemented yet): Workload, Security, Report, Cost,
   # Optimization, Bot, MAP Project. Azure tags are excluded by design.
   tags:
-    tenant: true
+    tenant: false
     # Assessment loops over every tenant from the shared tenant_ids list.
-    assessment: True
+    assessment: false
     # Below: simple TenantId-only tags, no sub-ID drill-down. Each loops over
     # the same shared tenant_ids list, same as Assessment.
-    user: True
-    account: True
-    resource: false
-    health: True
-    project: True 
+    user: false
+    account: false
+    resource: true
+    health: false
+    project: false 
     security: false
     # Organization uses a separate ID space (OrganizationId, not TenantId).
     # This phase only captures OrganizationId(s) via listOrganizations —
     # reserved for the Workload tag to be added later.
-    organization: True
+    organization: false
 
   # Tenant tag: PageSize query param for GET /tenants.
   tenants_page_size: 10

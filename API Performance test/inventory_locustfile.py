@@ -1,20 +1,40 @@
 #!/usr/bin/env python3
 """
-MontyCloud Inventory Summary — Locust Performance Test
+MontyCloud Inventory — Locust Performance Test
 =========================================================
-Standalone Locust scenario simulating the Inventory summary page:
+Standalone Locust scenario simulating the Inventory page, derived from HAR
+analysis of real UI traffic (see inventory_Plan_additional_resources.md):
 
-  Sign-in -> think time -> Inventory flow (1 batch; calls within the batch
-  fire in parallel via gevent greenlets, same pattern as
-  cost_dashboard_locustfile.py — see common.py's run_batch()).
+  Sign-in -> think time -> Batch A (initial load) ->
+  [Batch B (filter applied) -> Batch C (filter cleared)] per configured
+  ResourceType -> Batch D (sequential resource-type drilldowns).
 
-Batch (per PRD in Inventory_api/Inventory_api, confirmed batch-1 dropped):
+  Batch A, B and C calls fire in parallel via gevent greenlets (see
+  common.py's run_batch()); Batch D calls are strictly sequential, one call
+  per simulated "click", with 2-10s think time between each.
 
-  /org/inventory-summary for SummaryType=by-account, by-region and
-  by-resourcetype (parallel, 3 calls) — the "by-account" tab load, which
-  fetches all three summary widgets together.
+Batch A — initial page load (parallel):
+  GET /org/resources (Filters.ResourceType=CustomerAccount), GET
+  /org/inventory-summary for SummaryType=by-account/by-region/by-resourcetype,
+  GET /org/resource-governance-summary.
 
-A 1-3s pause (batch_think_time_min/max) is inserted after the batch.
+Batch B — filter applied (parallel, repeated once per `filter_resource_types`
+  entry): the 3 inventory-summary calls above, filtered by
+  Filters.ResourceType=<type>.
+
+Batch C — filter cleared (parallel): same shape as Batch A minus
+  /org/resources.
+
+Batch D — sequential resource-type drilldowns (NOT parallel): one
+  GET /org/resources_paginated call per resource type in the hardcoded
+  `_DRILLDOWN_RESOURCE_TYPES` constant below, 2-10s apart.
+
+A 1-3s pause (batch_think_time_min/max) is inserted after Batch A/B/C; a
+2-10s pause (drilldown_think_time_min/max) after each Batch D call.
+
+The target environment is selectable via `--env <key>` (e.g. `--env qa`),
+resolved from the shared `api.environments`/`api.default_env` block in
+config.yaml (falls back to `api.default_env` when --env is omitted).
 
 This file intentionally does NOT touch locustfile.py's Home/WAFR/Health/Chat
 journey — it shares the same config.yaml (its own `inventory:` section) and
@@ -23,11 +43,12 @@ its own on_test_start/on_test_stop hooks.
 
 Usage (headless — recommended):
     locust -f inventory_locustfile.py --headless \\
-      --users 10 --spawn-rate 2 --run-time 5m \\
+      --users 10 --spawn-rate 2 --run-time 5m --env qa \\
       --html reports/inventory_report.html \\
       --csv reports/inventory_stats
 """
 
+import json
 import logging
 import random
 import sys
@@ -60,7 +81,11 @@ import common  # noqa: E402
 
 CFG: Dict[str, Any] = common.load_config(_CONFIG_FILE)
 
-BASE_URL: str = CFG["api"]["base_url"].rstrip("/")
+# Named environments (api.environments/api.default_env) selectable via
+# --env <key> at the command line; falls back to a single "default" entry
+# built from api.base_url if environments: isn't configured.
+_ENVIRONMENTS, _DEFAULT_ENV = common.resolve_environments(CFG["api"], "inventory_locustfile.py")
+BASE_URL: str = _ENVIRONMENTS[_DEFAULT_ENV]
 MC_DEBUG_MODE: bool = bool(CFG["api"].get("mc_debug_mode", True))
 TIMEOUT: int = int(CFG["api"].get("timeout_seconds", 40))
 
@@ -99,6 +124,54 @@ _BATCH_2_SUMMARY_TYPES: List[str] = list(
     _inventory_cfg.get("batch_2_summary_types", ["by-account", "by-region", "by-resourcetype"]) or []
 )
 
+# Batch A — initial page load additions (GET /org/resources +
+# GET /org/resource-governance-summary alongside the 3 summary calls above).
+_BATCH_A_ENABLED: bool = bool(_inventory_cfg.get("batch_a_enabled", True))
+_BATCH_A_ORG_RESOURCE_TYPE: str = str(_inventory_cfg.get("batch_a_org_resource_type", "CustomerAccount"))
+
+# Batch B/C — filter apply/clear cycle. All entries run every iteration, in
+# order (not a random pick) — see plan §3.
+_FILTER_RESOURCE_TYPES: List[str] = list(_inventory_cfg.get("filter_resource_types", []) or [])
+
+# Batch D — think time between sequential drilldown calls (2-10s in the HAR).
+_DRILLDOWN_THINK_MIN: float = float(_inventory_cfg.get("drilldown_think_time_min", 2))
+_DRILLDOWN_THINK_MAX: float = float(_inventory_cfg.get("drilldown_think_time_max", 10))
+
+# Batch D — sequential resource-type drilldowns, fired one per click with
+# 2-10s think time between each (not parallel). Hardcoded here (not in
+# config.yaml) per decision: this is a fixed replication of the observed HAR
+# sequence, not a per-run tunable. Deduped from the HAR's raw sequence (the
+# repeated Image call via /org/resources and the trailing repeated Instance
+# call were dropped — each resource type appears exactly once).
+_DRILLDOWN_RESOURCE_TYPES: List[Dict[str, Any]] = [
+    {"type": "Instance", "limit": 10},
+    {"type": "Image", "limit": 10},
+    {"type": "Workspace", "offset": 0, "limit": 100},
+    {"type": "NotebookInstance", "offset": 0, "limit": 100},
+    {"type": "Volume", "limit": 10},
+    {"type": "Snapshot", "limit": 10},
+    {"type": "S3", "limit": 10},
+]
+
+
+# ---------------------------------------------------------------------------
+# Custom CLI flag: --env <key>
+# ---------------------------------------------------------------------------
+
+
+@events.init_command_line_parser.add_listener
+def _add_custom_args(parser) -> None:
+    parser.add_argument(
+        "--env",
+        type=str,
+        default=None,
+        choices=sorted(_ENVIRONMENTS),
+        help=(
+            f"Environment to target ({'/'.join(sorted(_ENVIRONMENTS))}). "
+            f"Defaults to api.default_env in config.yaml ({_DEFAULT_ENV})."
+        ),
+    )
+
 
 # ---------------------------------------------------------------------------
 # Locust User class
@@ -107,9 +180,11 @@ _BATCH_2_SUMMARY_TYPES: List[str] = list(
 
 class InventoryUser(HttpUser):
     """
-    Simulates a single MontyCloud user viewing the Inventory summary page:
+    Simulates a single MontyCloud user viewing the Inventory page:
       1. Sign in (on_start — once per spawn).
-      2. @task: run the Inventory flow (1 batch).
+      2. @task: run the Inventory flow — Batch A (initial load), then
+         Batch B/C (filter apply/clear) per configured ResourceType, then
+         Batch D (sequential resource-type drilldowns).
 
     Request names are prefixed [Auth] / [Inventory] so report_generator.py
     can bucket them into sections, same convention as locustfile.py.
@@ -126,6 +201,18 @@ class InventoryUser(HttpUser):
         _adapter = HTTPAdapter(pool_connections=1, pool_maxsize=20)
         self.client.mount("https://", _adapter)
         self.client.mount("http://", _adapter)
+
+        opts = getattr(self.environment, "parsed_options", None)
+        env_choice = (getattr(opts, "env", None) or _DEFAULT_ENV).strip().lower()
+        base_url = _ENVIRONMENTS.get(env_choice)
+        if not base_url:
+            logger.error(
+                "Unknown --env %r (expected one of %s); falling back to %r.",
+                env_choice, sorted(_ENVIRONMENTS), _DEFAULT_ENV,
+            )
+            base_url = _ENVIRONMENTS[_DEFAULT_ENV]
+        self.client.base_url = base_url
+
         self._token, self._org_id = common.signin(
             self.client, self._creds, MC_DEBUG_MODE, TIMEOUT, logger,
         )
@@ -169,22 +256,90 @@ class InventoryUser(HttpUser):
             )
 
     # ------------------------------------------------------------------
-    # Inventory flow  (single batch — by-account tab load)
+    # Inventory flow  (Batch A -> [Batch B -> Batch C]* -> Batch D)
     # ------------------------------------------------------------------
 
-    def _inventory_summary(self, summary_type: str):
-        return self._get(
-            "/org/inventory-summary",
-            f"[Inventory] inventory-summary ({summary_type})",
-            params={"CloudProvider": _CLOUD_PROVIDER, "SummaryType": summary_type},
+    def _inventory_summary(self, summary_type: str, resource_type: Optional[str] = None):
+        params: Dict[str, Any] = {"CloudProvider": _CLOUD_PROVIDER, "SummaryType": summary_type}
+        name = f"[Inventory] inventory-summary ({summary_type})"
+        if resource_type:
+            params["Filters"] = json.dumps({"ResourceType": [resource_type]})
+            name = f"[Inventory] inventory-summary ({summary_type}, filtered)"
+        return self._get("/org/inventory-summary", name, params=params)
+
+    def _resources(self) -> None:
+        self._get(
+            "/org/resources",
+            "[Inventory] resources",
+            params={
+                "CloudProvider": _CLOUD_PROVIDER,
+                "Filters": json.dumps({
+                    "Orgs": [self._org_id],
+                    "Detail": True,
+                    "ResourceType": _BATCH_A_ORG_RESOURCE_TYPE,
+                }),
+            },
         )
 
-    def _inventory_flow(self) -> None:
-        # ── by-account + by-region + by-resourcetype (parallel) ───────────
-        self._run_batch([
+    def _resource_governance_summary(self) -> None:
+        self._get(
+            "/org/resource-governance-summary",
+            "[Inventory] resource-governance-summary",
+            params={"CloudProvider": _CLOUD_PROVIDER},
+        )
+
+    def _resources_paginated(self, drilldown: Dict[str, Any]) -> None:
+        resource_type = drilldown["type"]
+        params: Dict[str, Any] = {
+            "Filters": json.dumps({"ResourceType": resource_type, "Detail": True}),
+            "Limit": drilldown["limit"],
+        }
+        if "offset" in drilldown:
+            params["CloudProvider"] = _CLOUD_PROVIDER
+            params["Offset"] = drilldown["offset"]
+        self._get(
+            "/org/resources_paginated",
+            f"[Inventory] resources_paginated ({resource_type})",
+            params=params,
+        )
+
+    def _batch_a(self) -> None:
+        """Initial page load: resources + 3x inventory-summary + governance-summary (parallel)."""
+        calls = [
             lambda _st=st: self._inventory_summary(_st) for st in _BATCH_2_SUMMARY_TYPES
+        ]
+        if _BATCH_A_ENABLED:
+            calls = [self._resources, *calls, self._resource_governance_summary]
+        self._run_batch(calls)
+        gevent.sleep(random.uniform(_BATCH_THINK_MIN, _BATCH_THINK_MAX))
+
+    def _batch_b(self, resource_type: str) -> None:
+        """Filter applied: 3x inventory-summary, filtered by ResourceType (parallel)."""
+        self._run_batch([
+            lambda _st=st: self._inventory_summary(_st, resource_type) for st in _BATCH_2_SUMMARY_TYPES
         ])
         gevent.sleep(random.uniform(_BATCH_THINK_MIN, _BATCH_THINK_MAX))
+
+    def _batch_c(self) -> None:
+        """Filter cleared: back to the unfiltered 3x inventory-summary + governance-summary (parallel)."""
+        self._run_batch([
+            *[lambda _st=st: self._inventory_summary(_st) for st in _BATCH_2_SUMMARY_TYPES],
+            self._resource_governance_summary,
+        ])
+        gevent.sleep(random.uniform(_BATCH_THINK_MIN, _BATCH_THINK_MAX))
+
+    def _batch_d(self) -> None:
+        """Sequential resource-type drilldowns, one call per click (not parallel)."""
+        for drilldown in _DRILLDOWN_RESOURCE_TYPES:
+            self._resources_paginated(drilldown)
+            gevent.sleep(random.uniform(_DRILLDOWN_THINK_MIN, _DRILLDOWN_THINK_MAX))
+
+    def _inventory_flow(self) -> None:
+        self._batch_a()
+        for resource_type in _FILTER_RESOURCE_TYPES:
+            self._batch_b(resource_type)
+            self._batch_c()
+        self._batch_d()
 
 
 if not _INVENTORY_ENABLED:
@@ -198,6 +353,18 @@ if _INVENTORY_MODE != "standalone":
         "'standalone' is implemented) — running standalone anyway.",
         _INVENTORY_MODE,
     )
+
+# ---------------------------------------------------------------------------
+# Event hook: detailed per-request failures CSV (full URL, not just name)
+# ---------------------------------------------------------------------------
+
+
+@events.test_start.add_listener
+def on_test_start_failure_logger(environment, **kwargs) -> None:
+    opts = getattr(environment, "parsed_options", None)
+    csv_prefix = getattr(opts, "csv_prefix", None) if opts else None
+    common.attach_failure_detail_logger(environment, csv_prefix, logger)
+
 
 # ---------------------------------------------------------------------------
 # Event hook: single_journey auto-exit (same watchdog as locustfile.py)

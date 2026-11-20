@@ -9,9 +9,13 @@ Within each batch, all HTTP calls are fired in parallel using gevent greenlets.
 Batches are strictly sequential: each batch waits for 100 % of its calls to
 complete before the next batch starts.
 
+The target environment is selectable via `--env <key>` (e.g. `--env qa`),
+resolved from the shared `api.environments`/`api.default_env` block in
+config.yaml (falls back to `api.default_env` when --env is omitted).
+
 Usage (headless — recommended):
     locust -f locustfile.py --headless \\
-      --users 10 --spawn-rate 2 --run-time 5m \\
+      --users 10 --spawn-rate 2 --run-time 5m --env qa \\
       --html reports/locust_report.html \\
       --csv reports/stats
 
@@ -68,7 +72,8 @@ import common  # noqa: E402
 
 CFG: Dict[str, Any] = common.load_config(_CONFIG_FILE)
 
-BASE_URL: str = CFG["api"]["base_url"].rstrip("/")
+_ENVIRONMENTS, _DEFAULT_ENV = common.resolve_environments(CFG["api"], "locustfile.py")
+BASE_URL: str = _ENVIRONMENTS[_DEFAULT_ENV]
 MC_DEBUG_MODE: bool = bool(CFG["api"].get("mc_debug_mode", True))
 TIMEOUT: int = int(CFG["api"].get("timeout_seconds", 40))
 
@@ -252,6 +257,25 @@ def _record_user_session_timeouts(email: str, count: int) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Custom CLI flag: --env <key>
+# ---------------------------------------------------------------------------
+
+
+@events.init_command_line_parser.add_listener
+def _add_custom_args(parser) -> None:
+    parser.add_argument(
+        "--env",
+        type=str,
+        default=None,
+        choices=sorted(_ENVIRONMENTS),
+        help=(
+            f"Environment to target ({'/'.join(sorted(_ENVIRONMENTS))}). "
+            f"Defaults to api.default_env in config.yaml ({_DEFAULT_ENV})."
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Locust User class
 # ---------------------------------------------------------------------------
 
@@ -274,7 +298,7 @@ class MontyCloudUser(HttpUser):
     # ------------------------------------------------------------------
 
     def on_start(self) -> None:
-        """Assign credentials, sign in, and fetch OrganizationId."""
+        """Assign credentials, resolve --env, sign in, and fetch OrganizationId."""
         self._creds: Dict[str, str] = _user_claimer.claim()
         self._token: Optional[str] = None
         self._org_id: str = ""
@@ -286,6 +310,18 @@ class MontyCloudUser(HttpUser):
         _adapter = HTTPAdapter(pool_connections=1, pool_maxsize=50)
         self.client.mount("https://", _adapter)
         self.client.mount("http://", _adapter)
+
+        opts = getattr(self.environment, "parsed_options", None)
+        env_choice = (getattr(opts, "env", None) or _DEFAULT_ENV).strip().lower()
+        base_url = _ENVIRONMENTS.get(env_choice)
+        if not base_url:
+            logger.error(
+                "Unknown --env %r (expected one of %s); falling back to %r.",
+                env_choice, sorted(_ENVIRONMENTS), _DEFAULT_ENV,
+            )
+            base_url = _ENVIRONMENTS[_DEFAULT_ENV]
+        self.client.base_url = base_url
+
         self._signin()
 
     # ------------------------------------------------------------------

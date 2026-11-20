@@ -1,5 +1,15 @@
 api:
-  # Base URL of the MontyCloud API (no trailing slash)
+  # Named environments, selectable at runtime via `--env <key>` on
+  # cost_dashboard_locustfile.py (kept in sync with the same block in
+  # config.yaml used by locustfile.py / inventory_locustfile.py).
+  environments:
+    dev1: "https://dev-api.montycloud.com"
+    qa: "https://qa-us-api.montycloud.com"
+    stg1: "https://stg1-api.montycloud.com"
+  # Environment used when --env is omitted on the command line.
+  default_env: "stg1"
+  # Base URL of the MontyCloud API (no trailing slash). Kept as a fallback
+  # for any code path that still reads api.base_url directly.
   base_url: "https://stg1-api.montycloud.com"
   # Pass MC_DEBUG_MODE=true in every signin payload (bypasses CAPTCHA checks)
   mc_debug_mode: true

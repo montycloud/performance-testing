@@ -15,6 +15,7 @@ import csv
 import os
 import re
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -37,6 +38,40 @@ def load_config(config_file: Path) -> Dict[str, Any]:
         )
     with open(config_file, "r", encoding="utf-8") as fh:
         return yaml.safe_load(fh)
+
+
+def resolve_environments(api_cfg: Dict[str, Any], label: str) -> Tuple[Dict[str, str], str]:
+    """Parse `api.environments`/`api.default_env` into a lowercase-keyed URL
+    map and a validated default key, for the shared `--env` CLI flag used by
+    locustfile.py / cost_dashboard_locustfile.py / inventory_locustfile.py.
+
+    Falls back to a single `"default"` entry built from `api.base_url` when
+    `environments:` isn't configured, so configs that haven't been migrated
+    yet keep working unchanged.
+    """
+    environments: Dict[str, str] = {
+        str(k).strip().lower(): str(v).rstrip("/")
+        for k, v in (api_cfg.get("environments", {}) or {}).items()
+    }
+    default_env = str(api_cfg.get("default_env", "") or "").strip().lower()
+
+    if not environments:
+        base_url = api_cfg.get("base_url")
+        if not base_url:
+            raise ValueError(
+                f"{label}: config has neither 'api.environments' nor "
+                "'api.base_url' — at least one is required."
+            )
+        return {"default": str(base_url).rstrip("/")}, "default"
+
+    if not default_env:
+        default_env = sorted(environments)[0]
+    if default_env not in environments:
+        raise ValueError(
+            f"{label}: api.default_env={default_env!r} is not a key in "
+            f"api.environments ({sorted(environments)})."
+        )
+    return environments, default_env
 
 
 def load_users(csv_path: Path, limit: int, logger) -> List[Dict[str, str]]:
@@ -322,7 +357,13 @@ def authenticated_get(
     ) as resp:
         if resp.status_code >= 400:
             resp.failure(f"HTTP {resp.status_code}")
-            logger.warning("FAIL  %-60s  →  HTTP %d", name, resp.status_code)
+            logger.warning(
+                "FAIL  %-60s  →  HTTP %d\n"
+                "    URL:      %s\n"
+                "    Params:   %s\n"
+                "    Response: %s",
+                name, resp.status_code, resp.url, params or {}, resp.text[:1000],
+            )
         else:
             try:
                 body = resp.json() or {}
@@ -331,3 +372,77 @@ def authenticated_get(
                 resp.failure("Response is not valid JSON")
                 body = {}
     return body
+
+
+def attach_failure_detail_logger(environment, csv_prefix: Optional[str], logger) -> None:
+    """Register a `request` event listener that writes one row per FAILED
+    request to `<csv_prefix>_failures_detail.csv`, alongside Locust's own
+    `<csv_prefix>_failures.csv`.
+
+    Locust's built-in failures CSV aggregates by (method, name, error) with
+    just an occurrence count — it has no column for the actual request URL,
+    which differs per occurrence (e.g. different ResourceType filters all
+    sharing the same request name). This sibling file has one row per
+    failure with the real URL (query params included), so a failing call can
+    be reproduced/debugged directly from the CSV instead of digging through
+    logs.
+
+    No-op if csv_prefix is falsy (--csv wasn't passed) or on a WorkerRunner
+    (only the master/single process writes the file).
+    """
+    if not csv_prefix:
+        logger.info(
+            "No --csv prefix configured; skipping detailed failures CSV "
+            "(enable with --csv reports/<name>_stats)."
+        )
+        return
+
+    from locust.runners import WorkerRunner  # local import: keep common.py locust-free at module load
+
+    if isinstance(environment.runner, WorkerRunner):
+        return
+
+    detail_path = Path(f"{csv_prefix}_failures_detail.csv")
+    detail_path.parent.mkdir(parents=True, exist_ok=True)
+    fh = open(detail_path, "w", newline="", encoding="utf-8")
+    writer = csv.writer(fh)
+    writer.writerow(["Timestamp", "Method", "Name", "URL", "StatusCode", "Error", "ResponseSnippet"])
+    fh.flush()
+    lock = threading.Lock()
+
+    def _on_request(
+        request_type: Optional[str] = None,
+        name: Optional[str] = None,
+        response: Any = None,
+        exception: Optional[BaseException] = None,
+        url: Optional[str] = None,
+        **_kwargs: Any,
+    ) -> None:
+        if exception is None:
+            return
+        status_code = getattr(response, "status_code", None)
+        full_url = getattr(response, "url", None) or url or ""
+        snippet = ""
+        if response is not None:
+            try:
+                snippet = (response.text or "")[:500].replace("\n", " ")
+            except Exception:
+                snippet = ""
+        with lock:
+            writer.writerow([
+                datetime.now(timezone.utc).isoformat(),
+                request_type, name, full_url, status_code, str(exception), snippet,
+            ])
+            fh.flush()
+
+    environment.events.request.add_listener(_on_request)
+
+    def _close(**_kwargs: Any) -> None:
+        try:
+            fh.close()
+        except Exception:
+            pass
+
+    environment.events.quitting.add_listener(_close)
+    logger.info("Detailed per-request failures CSV  →  %s", detail_path)
+
