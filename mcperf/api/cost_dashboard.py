@@ -6,6 +6,10 @@
   Batch 3  tag-keys lookup
   Batch 4  "Spend Trend" tab widgets (3 calls) — once per date-range preset
 
+v2 (optional, `cost_dashboard.v2.enabled`): fires the Redshift Data API v2
+counterparts (MCPLAT-35131) alongside their v1 calls, named "<name> (v2)",
+for direct A/B comparison in the custom HTML report.
+
 Request names are prefixed [Cost]; the report groups several of them into one row.
 """
 
@@ -22,6 +26,14 @@ from mcperf.core.config import ScenarioConfig, require_section
 from mcperf.locust.base_user import MontyCloudUser
 
 CHARGE_TYPES_EXCLUDE = {"exclude": ["Credit", "Refund"]}
+
+# v2 (Redshift Data API POC, MCPLAT-35131). Same request/response schema as
+# v1, only the path changes.
+_V2_PATH_COST_DASHBOARD = "/cost/cost-dashboard/v2"
+_V2_PATH_COST_SUMMARY = "/cost/cost-dashboard/cost-summary/v2"
+_V2_PATH_RESOURCE_SUMMARY = "/cost/cost-dashboard/resource-summary/v2"
+_V2_PATH_SPEND_TREND = "/cost/cost-dashboard/spend-trend/v2"
+_V2_PATH_SPEND_BREAKDOWN_SUMMARY = "/cost/cost-dashboard/spend-breakdown-summary/v2"
 
 
 @dataclass(frozen=True)
@@ -40,6 +52,7 @@ class CostDashboardConfig(ScenarioConfig):
     breakdown_limit: int = 25
     preset_think_time_min: float = 1.0
     preset_think_time_max: float = 3.0
+    v2_enabled: bool = False
 
     @classmethod
     def load_file(cls, path: Path) -> CostDashboardConfig:
@@ -64,6 +77,7 @@ class CostDashboardConfig(ScenarioConfig):
             breakdown_limit=int(section.get("breakdown_limit", 25)),
             preset_think_time_min=float(section.get("preset_think_time_min", 1)),
             preset_think_time_max=float(section.get("preset_think_time_max", 3)),
+            v2_enabled=bool((section.get("v2", {}) or {}).get("enabled", False)),
         )
 
 
@@ -87,10 +101,13 @@ class CostDashboardUser(MontyCloudUser):
         cfg = self.cfg
 
         # Batch 1 — dashboard bootstrap
-        self.run_batch([
+        batch1 = [
             self.cost_get("/cost/cost-dashboard", "[Cost] cost-dashboard"),
             self.cost_get("/cost/cost-dashboard/lookup", "[Cost] lookup"),
-        ])
+        ]
+        if cfg.v2_enabled:
+            batch1.append(self.cost_get(_V2_PATH_COST_DASHBOARD, "[Cost] cost-dashboard (v2)"))
+        self.run_batch(batch1)
         self.batch_think()
 
         # Batch 2 — "Total Spend" widgets, once per pass
@@ -118,28 +135,46 @@ class CostDashboardUser(MontyCloudUser):
 
     def total_spend_batch(self, base: dict[str, Any]) -> list:
         by_account = {"SummaryType": "by-account", **base}
-        return [
+        by_service = {"SummaryType": "by-service", **base}
+        calls = [
             self.cost_get("/cost/cost-dashboard/cost-summary", "[Cost] cost-summary (by-account)",
                           filters=by_account),
             self.cost_get("/cost/cost-dashboard/cost-summary", "[Cost] cost-summary (by-service)",
-                          filters={"SummaryType": "by-service", **base}),
+                          filters=by_service),
             self.cost_get("/cost/cost-dashboard/region-summary", "[Cost] region-summary", filters=base),
             self.cost_get("/cost/cost-dashboard/resource-summary", "[Cost] resource-summary", filters=base),
             self.cost_get("/cost/cost-dashboard/spend-trend", "[Cost] spend-trend", filters=by_account),
             self.cost_get("/cost/cost-by-charge-type", "[Cost] cost-by-charge-type", filters=base),
         ]
+        if self.cfg.v2_enabled:
+            calls += [
+                self.cost_get(_V2_PATH_COST_SUMMARY, "[Cost] cost-summary (by-account) (v2)",
+                              filters=by_account),
+                self.cost_get(_V2_PATH_COST_SUMMARY, "[Cost] cost-summary (by-service) (v2)",
+                              filters=by_service),
+                self.cost_get(_V2_PATH_RESOURCE_SUMMARY, "[Cost] resource-summary (v2)", filters=base),
+                self.cost_get(_V2_PATH_SPEND_TREND, "[Cost] spend-trend (v2)", filters=by_account),
+            ]
+        return calls
 
     def spend_trend_batch(self, base: dict[str, Any]) -> list:
         limit = self.cfg.breakdown_limit
         trend = {"SummaryType": "by-account", **base}
         breakdown = {**base, "SummaryType": "by-account"}
-        return [
+        calls = [
             self.cost_get("/cost/cost-dashboard/spend-trend", "[Cost] spend-trend-tab", filters=trend),
             self.cost_get("/cost/cost-dashboard/spend-breakdown-summary", "[Cost] spend-breakdown-summary",
                           filters=breakdown, Limit=limit, Offset=0),
             self.cost_get("/cost/cost-dashboard/resource-count", "[Cost] resource-count",
                           filters=breakdown, Limit=limit, Offset=0),
         ]
+        if self.cfg.v2_enabled:
+            calls += [
+                self.cost_get(_V2_PATH_SPEND_TREND, "[Cost] spend-trend-tab (v2)", filters=trend),
+                self.cost_get(_V2_PATH_SPEND_BREAKDOWN_SUMMARY, "[Cost] spend-breakdown-summary (v2)",
+                              filters=breakdown, Limit=limit, Offset=0),
+            ]
+        return calls
 
     def cost_get(self, path: str, name: str, filters: dict[str, Any] | None = None, **params: Any):
         """A pending GET with CloudProvider=AWS and optional JSON-encoded Filters."""

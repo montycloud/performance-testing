@@ -1,10 +1,17 @@
 """Main user journey: Home Page → WAFR → optional Health Events → optional AI Chat.
 
+Home Page and WAFR are independently toggled via `homepage.enabled` / `wafr.enabled`
+(both default true). Disabling one just skips its batches — unlike Health/Chat below,
+they have no `standalone` mode, since together they *are* the default journey.
+
 Modes (config `health.mode` / `chat.mode`, each only when enabled):
   default             sign in → Home → think → WAFR [→ think → Health] [→ think → Chat]
   chat standalone     sign in → think → Chat
   health standalone   sign in → think → Health
 If both are standalone, chat wins (a warning is logged at start-up).
+
+At least one of homepage.enabled, wafr.enabled, health.enabled, chat.enabled must be
+true, or there is nothing for the journey to run (JourneyConfig.load_file raises).
 
 Request names are prefixed [Auth] / [HomePage] / [WAFR] / [Health] / [Chat].
 """
@@ -47,6 +54,8 @@ class Toggle:
 
 @dataclass(frozen=True)
 class JourneyConfig(ScenarioConfig):
+    homepage_enabled: bool = True
+    wafr_enabled: bool = True
     wafr_think_time_min: float = 2.0
     wafr_think_time_max: float = 5.0
     health: Toggle = field(default_factory=Toggle)
@@ -57,12 +66,15 @@ class JourneyConfig(ScenarioConfig):
     def load_file(cls, path: Path) -> JourneyConfig:
         kwargs = cls.base_kwargs(path)
         raw, load = kwargs["raw"], kwargs["load"]
+        homepage = raw.get("homepage") or {}
         wafr = raw.get("wafr") or {}
         chat_raw = raw.get("chat") or {}
         chat = Toggle.from_dict(chat_raw, "chat")
         health = Toggle.from_dict(raw.get("health") or {}, "health")
         cfg = cls(
             **kwargs,
+            homepage_enabled=bool(homepage.get("enabled", True)),
+            wafr_enabled=bool(wafr.get("enabled", True)),
             wafr_think_time_min=float(wafr.get("think_time_min", load.think_time_min)),
             wafr_think_time_max=float(wafr.get("think_time_max", load.think_time_max)),
             health=health,
@@ -76,6 +88,11 @@ class JourneyConfig(ScenarioConfig):
             logging.getLogger("perf_test").warning(
                 "Both health.mode and chat.mode are 'standalone' — chat takes precedence; "
                 "the Health Events flow will not run this test."
+            )
+        if not (cfg.homepage_enabled or cfg.wafr_enabled or health.enabled or chat.enabled):
+            raise ValueError(
+                f"{kwargs['path']}: homepage.enabled, wafr.enabled, health.enabled and "
+                "chat.enabled are all false — this journey would do nothing. Enable at least one."
             )
         return cfg
 
@@ -120,9 +137,15 @@ class JourneyUser(MontyCloudUser):
             self.page_think()
             health_flow(self)
         else:
-            homepage_flow(self)
-            self.page_think()
-            wafr_flow(self, self.wafr_think)
+            ran_any = False
+            if cfg.homepage_enabled:
+                homepage_flow(self)
+                ran_any = True
+            if cfg.wafr_enabled:
+                if ran_any:
+                    self.page_think()
+                wafr_flow(self, self.wafr_think)
+                ran_any = True
             if cfg.health.enabled:
                 self.page_think()
                 health_flow(self)

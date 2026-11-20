@@ -37,7 +37,17 @@ report:
      Tenants 3  ( MSP ,Tenant 1 and Tenant 2 )
      Query: Tenant Net Cost Report \n Scope \n * Analyze cloud net costs for selected tenant(s) for the last two complete calendar months
 
+# Home Page / WAFR toggles. Both default true so existing configs without
+# these keys keep behaving exactly as before. When disabled, that flow's
+# batches are simply skipped in the journey (Signin -> whichever of
+# Home Page/WAFR is still enabled -> Health/Chat as configured below).
+# These do not affect the Health/Chat `standalone` modes above, which
+# already bypass Home Page/WAFR regardless of these toggles.
+homepage:
+  enabled: true
+
 wafr:
+  enabled: true
   # Pause (seconds) between batches inside the WAFR page. Defaults to load.think_time_*.
   think_time_min: 1
   think_time_max: 3

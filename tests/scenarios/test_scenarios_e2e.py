@@ -51,6 +51,35 @@ def test_cost_dashboard(tmp_path):
     assert count(rows, "Aggregated") == 2 + 2 + 6 * 3 + 1 + 3 * 2
 
 
+def test_cost_dashboard_v2(tmp_path):
+    overrides = {"cost_dashboard": {
+        "preset_think_time_min": 0, "preset_think_time_max": 0,
+        "date_range_presets": [{"label": "30d", "days_back": 30}, {"label": "7d", "days_back": 7}],
+        "v2": {"enabled": True},
+    }}
+    with mock_api() as (url, _hits):
+        proc, rows = run_scenario("cost_dashboard", tmp_path, url, overrides)
+    assert_clean(proc, rows)
+    # v1 counts are unchanged from test_cost_dashboard; v2 fires alongside every
+    # v1 call that has a counterpart, same cadence (once per batch-1 call, once
+    # per pass for batch 2, once per preset for batch 4).
+    assert count(rows, "[Cost] cost-dashboard") == 1
+    assert count(rows, "[Cost] cost-dashboard (v2)") == 1
+    assert count(rows, "[Cost] cost-summary (by-account) (v2)") == 3
+    assert count(rows, "[Cost] resource-summary (v2)") == 3
+    assert count(rows, "[Cost] spend-trend (v2)") == 3
+    assert count(rows, "[Cost] spend-trend-tab (v2)") == 2
+    assert count(rows, "[Cost] spend-breakdown-summary (v2)") == 2
+    # No v2 counterpart: unaffected.
+    assert count(rows, "[Cost] lookup-tag-keys") == 1
+    assert count(rows, "[Cost] resource-count") == 2
+    # v1-only total (29, see test_cost_dashboard) + v2: batch1 1 + batch2 4*3 + batch4 2*2
+    assert count(rows, "Aggregated") == (2 + 2 + 6 * 3 + 1 + 3 * 2) + (1 + 4 * 3 + 2 * 2)
+    reports = list(tmp_path.glob("custom_cost_dashboard_*.html"))
+    assert len(reports) == 1
+    assert "v1 vs v2 Comparison" in reports[0].read_text(encoding="utf-8")
+
+
 def test_day2sdk_all_tags(tmp_path):
     tags = dict.fromkeys(
         ("tenant", "assessment", "user", "account", "resource", "health", "project", "security", "organization"),
@@ -83,13 +112,36 @@ def test_journey_home_wafr_health(tmp_path):
         proc, rows = run_scenario("journey", tmp_path, url, overrides)
     assert_clean(proc, rows)
     assert count(rows, "[Auth] /auth/signin") == 1
-    assert count(rows, "[HomePage] /subscription/product-catalog") == 3
+    assert count(rows, "[HomePage] /subscription/product-catalog") == 1
     assert count(rows, "[HomePage] /org/organization/{id}") == 1
     assert count(rows, "[WAFR] /war-assessment/workload/{id}/findings-summary-by-severity (pillar=security)") == 2
     assert count(rows, "[WAFR] /war-assessment/workload/{id}/findings") == 3
     assert count(rows, "[Health] /health/api/v1/events/{id}/affected-resources") == 1
-    # auth 2 + home (1+2+15+2+7) + wafr (1+28+3+5) + health (1+2+1+1+1+1+2)
-    assert count(rows, "Aggregated") == 2 + 27 + 37 + 9
+    # auth 2 + home (1+1+1+8+2+2+7) + wafr (1+28+3+5) + health (1+2+1+1+1+1+2)
+    assert count(rows, "Aggregated") == 2 + 22 + 37 + 9
+
+
+def test_journey_homepage_disabled(tmp_path):
+    overrides = {"homepage": {"enabled": False}, "wafr": {"think_time_min": 0, "think_time_max": 0}}
+    with mock_api() as (url, _hits):
+        proc, rows = run_scenario("journey", tmp_path, url, overrides)
+    assert_clean(proc, rows)
+    assert not any(name.startswith("[HomePage]") for name in rows)
+    assert count(rows, "[WAFR] /war-assessment/workload/{id}/findings") == 3
+    # auth 2 + wafr (1+28+3+5); health/chat disabled by the shipped config's defaults.
+    assert count(rows, "Aggregated") == 2 + 37
+
+
+def test_journey_wafr_disabled(tmp_path):
+    overrides = {"wafr": {"enabled": False}}
+    with mock_api() as (url, _hits):
+        proc, rows = run_scenario("journey", tmp_path, url, overrides)
+    assert_clean(proc, rows)
+    assert not any(name.startswith("[WAFR]") for name in rows)
+    assert count(rows, "[HomePage] /org/organization/{id}") == 1
+    assert count(rows, "[HomePage] /subscription/product-catalog") == 1
+    # auth 2 + home (1+1+1+8+2+2+7); health/chat disabled by the shipped config's defaults.
+    assert count(rows, "Aggregated") == 2 + 22
 
 
 def test_journey_health_standalone_skips_home_and_wafr(tmp_path):

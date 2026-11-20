@@ -6,7 +6,7 @@ MontyCloud API. Calls inside a batch fire in parallel; batches run in order.
 | Scenario | Run | Flow code | What it covers |
 |---|---|---|---|
 | Main journey | `scenarios/api/journey/locustfile.py` | `mcperf/api/journey.py`, `mcperf/api/pages/`, `mcperf/api/chat.py` | Home Page → WAFR → optional Health Events → optional AI Chat (WebSocket) |
-| Cost Dashboard | `scenarios/api/cost_dashboard/locustfile.py` | `mcperf/api/cost_dashboard.py` | 4 batches, Total Spend and Spend Trend once per date-range preset |
+| Cost Dashboard | `scenarios/api/cost_dashboard/locustfile.py` | `mcperf/api/cost_dashboard.py` | 4 batches, Total Spend and Spend Trend once per date-range preset; optional v1-vs-v2 Redshift Data API A/B comparison |
 | Inventory | `scenarios/api/inventory/locustfile.py` | `mcperf/api/inventory.py` | `/org/inventory-summary` by account, region and resource type |
 | Day2SDK | `scenarios/api/day2sdk/locustfile.py` | `mcperf/api/day2sdk.py` | Day2SDK public API GETs, grouped by API tag, key-pair auth |
 
@@ -104,6 +104,13 @@ so repeated calls aggregate.
 
 ## Journey details
 
+**Home Page / WAFR toggles.** `homepage.enabled` and `wafr.enabled` (both default `true`)
+independently turn each flow on or off. Disabling one just skips its batches — Home
+and WAFR don't have an `appended`/`standalone` mode like Health/Chat below, since
+together they *are* the default journey. At least one of `homepage.enabled`,
+`wafr.enabled`, `health.enabled`, `chat.enabled` must be true, or the journey has
+nothing to run and `JourneyConfig.load_file` raises at start-up.
+
 **Modes.** `health:` and `chat:` each have `enabled` and `mode`:
 
 - `appended` — Home → think → WAFR → [think → Health] → [think → Chat]
@@ -128,6 +135,17 @@ until `PROMPT_STATUS: ENDED` or `chat.timeout_seconds`.
   user appear in the report.
 - `chat.transcript_log` records every frame; blank disables it.
 - One query per connection; multi-turn on one connection is not implemented.
+
+## Cost Dashboard details
+
+**v1 vs v2 (Redshift Data API POC, MCPLAT-35131).** Set `cost_dashboard.v2.enabled: true`
+to fire v2 counterparts (`.../v2` paths) alongside every v1 call that has one
+(cost-dashboard, cost-summary, resource-summary, spend-trend,
+spend-breakdown-summary) — same filters, same batch, named `"<name> (v2)"`.
+Endpoints with no v2 counterpart (lookup, region-summary, cost-by-charge-type,
+lookup-tag-keys, resource-count) are unaffected. The custom HTML report adds a
+"v1 vs v2 Comparison" table (avg response time delta, ms and %) when both rows
+are present; default `false` has zero impact on existing v1-only runs/reports.
 
 ## Adding a scenario
 
