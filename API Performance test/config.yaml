@@ -250,6 +250,67 @@ inventory:
   batch_think_time_min: 1
   batch_think_time_max: 3
 
+# Endpoint-targeted load test — run via the SEPARATE
+# inventory_endpoint_load_locustfile.py (its own HttpUser classes, its own
+# on_test_start/on_test_stop hooks). Unlike `inventory:` above (which
+# replicates one realistic, sequential user journey), this test decouples
+# /org/resources, /org/resources_paginated and /org/inventory-summary into
+# independent, continuously-looping User classes so each can be paced toward
+# its own target throughput (e.g. matching prod OPS per endpoint) instead of
+# being capped by the slowest step in a shared journey.
+#
+# Each class's `wait_time` uses Locust's constant_throughput(n) helper: n is
+# the target iterations/second PER SIMULATED USER of that class (so a class's
+# aggregate OPS ≈ (its share of --users, controlled by `weight` below) × n —
+# calibrate `weight` and `target_ops_per_user` together, empirically, by
+# running short passes and checking the measured OPS in the stats CSV; actual
+# throughput is still capped by real backend response time (Little's Law)
+# regardless of these settings. `enabled: false` disables this test entirely
+# without needing any code change/rollback.
+endpoint_load:
+  enabled: true
+
+  users_csv: "./users.csv"
+  user_count: 50
+  cloud_provider: "AWS"
+  batch_a_org_resource_type: "CustomerAccount"
+  summary_types:
+    - "by-account"
+    - "by-region"
+    - "by-resourcetype"
+
+  # GET /org/resources, looped continuously (no filter cycle, no drilldowns —
+  # just this one call, paced independently).
+  resources:
+    weight: 3
+    target_ops_per_user: 0.67
+
+  # GET /org/resources_paginated, round-robin across the same 7 resource
+  # types inventory_locustfile.py uses for Batch D (kept as its own constant
+  # here — see _DRILLDOWN_RESOURCE_TYPES in inventory_endpoint_load_locustfile.py).
+  resources_paginated:
+    weight: 3
+    target_ops_per_user: 0.53
+
+  # GET /org/inventory-summary, round-robin across `summary_types` above
+  # (unfiltered only — no Batch B/C filter cycle).
+  inventory_summary:
+    weight: 10
+    target_ops_per_user: 0.11
+
+  # Light background pings on /auth/user + /org/resource-governance-summary
+  # so they're not left completely idle, without materially affecting load.
+  background:
+    weight: 1
+    target_ops_per_user: 0.05
+
+  report_name: "endpoint_load"
+  description: |
+    Endpoint-targeted load test — independently paces /org/resources,
+    /org/resources_paginated and /org/inventory-summary toward prod-equivalent
+    OPS targets (plus light background load on auth/governance-summary),
+    instead of replicating one shared realistic user journey.
+
 # Day2SDK Tenant API flow — run via the SEPARATE day2sdk_api/day2sdk_locustfile.py
 # (its own HttpUser, its own on_test_start/on_test_stop hooks). GET-only, Tenant
 # section first pass. Does NOT use users.csv/the `test:` users_csv+user_count
