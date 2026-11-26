@@ -112,6 +112,20 @@ _RESOURCES_PAGINATED_CFG: Dict[str, Any] = _cfg.get("resources_paginated", {}) o
 _INVENTORY_SUMMARY_CFG: Dict[str, Any] = _cfg.get("inventory_summary", {}) or {}
 _BACKGROUND_CFG: Dict[str, Any] = _cfg.get("background", {}) or {}
 
+# Cloud providers to round-robin across for /org/resources and
+# /org/inventory-summary — per captured real traffic, the page fires one call
+# per configured cloud provider (e.g. AWS, Azure) rather than a single fixed
+# value. /org/resources_paginated's captured calls had no CloudProvider param
+# at all for non-offset drilldown types, so it's left untouched.
+_CLOUD_PROVIDERS: List[str] = list(_cfg.get("cloud_providers", [_CLOUD_PROVIDER]) or [_CLOUD_PROVIDER])
+
+# Cross-product of summary_types x cloud_providers, round-robinned by
+# InventorySummaryLoadUser so every summary type gets exercised against every
+# configured provider over time.
+_SUMMARY_TYPE_PROVIDER_COMBOS: List[tuple] = [
+    (st, cp) for st in _SUMMARY_TYPES for cp in _CLOUD_PROVIDERS
+]
+
 
 def _weight(class_cfg: Dict[str, Any], default: int) -> int:
     return max(1, int(class_cfg.get("weight", default)))
@@ -206,18 +220,22 @@ class _BaseLoadUser(HttpUser):
 
 
 class ResourcesLoadUser(_BaseLoadUser):
-    """Loops GET /org/resources only, paced independently of every other endpoint."""
+    """Loops GET /org/resources, round-robin across configured cloud providers
+    (ResourceType stays fixed at CustomerAccount — per captured traffic, only
+    CloudProvider varies between calls, not ResourceType)."""
 
     weight = _weight(_RESOURCES_CFG, 3)
     wait_time = constant_throughput(_rate(_RESOURCES_CFG, 0.67))
 
     @task
     def hit_resources(self) -> None:
+        cloud_provider = _CLOUD_PROVIDERS[self._rr_index % len(_CLOUD_PROVIDERS)]
+        self._rr_index += 1
         self._get(
             "/org/resources",
-            "[Inventory] resources",
+            f"[Inventory] resources ({cloud_provider})",
             params={
-                "CloudProvider": _CLOUD_PROVIDER,
+                "CloudProvider": cloud_provider,
                 "Filters": json.dumps({
                     "Orgs": [self._org_id],
                     "Detail": True,
@@ -253,19 +271,23 @@ class ResourcesPaginatedLoadUser(_BaseLoadUser):
 
 
 class InventorySummaryLoadUser(_BaseLoadUser):
-    """Loops GET /org/inventory-summary, round-robin across `summary_types` (unfiltered only)."""
+    """Loops GET /org/inventory-summary, round-robin across the cross-product
+    of `summary_types` x configured cloud providers (unfiltered only — per
+    captured traffic, CloudProvider varies the same way /org/resources does)."""
 
     weight = _weight(_INVENTORY_SUMMARY_CFG, 10)
     wait_time = constant_throughput(_rate(_INVENTORY_SUMMARY_CFG, 0.11))
 
     @task
     def hit_inventory_summary(self) -> None:
-        summary_type = _SUMMARY_TYPES[self._rr_index % len(_SUMMARY_TYPES)]
+        summary_type, cloud_provider = _SUMMARY_TYPE_PROVIDER_COMBOS[
+            self._rr_index % len(_SUMMARY_TYPE_PROVIDER_COMBOS)
+        ]
         self._rr_index += 1
         self._get(
             "/org/inventory-summary",
-            f"[Inventory] inventory-summary ({summary_type})",
-            params={"CloudProvider": _CLOUD_PROVIDER, "SummaryType": summary_type},
+            f"[Inventory] inventory-summary ({summary_type}, {cloud_provider})",
+            params={"CloudProvider": cloud_provider, "SummaryType": summary_type},
         )
 
 

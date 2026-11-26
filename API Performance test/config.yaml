@@ -279,30 +279,53 @@ endpoint_load:
     - "by-region"
     - "by-resourcetype"
 
+  # Cloud providers to round-robin for /org/resources and
+  # /org/inventory-summary — per captured real traffic, the page fires one
+  # call per configured provider (ResourceType/SummaryType stay as-is,
+  # CloudProvider is the thing that varies). /org/resources_paginated's
+  # captured calls had no CloudProvider param for non-offset drilldown types,
+  # so it intentionally isn't included here.
+  cloud_providers:
+    - "AWS"
+    - "Azure"
+
   # GET /org/resources, looped continuously (no filter cycle, no drilldowns —
   # just this one call, paced independently).
+  #
+  # weight/target_ops_per_user below are calibrated from Little's Law using
+  # the measured avg response times in batch1_db_downsized's single_journey
+  # run (resources ~10.86s, paginated ~1.43s avg/type, summary ~11.55s avg
+  # unfiltered, governance+auth/user ~7.5s avg): users_needed = target_OPS x
+  # avg_RT. target_ops_per_user is set a little ABOVE the measured
+  # 1/avg_RT ceiling for each class so constant_throughput never artificially
+  # throttles below what the backend can actually sustain — real throughput
+  # will be response-time-bound, not wait-time-bound. Re-measure actual
+  # achieved OPS after a run and adjust `weight` up/down from there; response
+  # time typically gets WORSE at higher concurrency than what was measured
+  # at 10 users, so expect to calibrate upward, not just use these as-is.
   resources:
-    weight: 3
-    target_ops_per_user: 0.67
+    weight: 325
+    target_ops_per_user: 0.15
 
   # GET /org/resources_paginated, round-robin across the same 7 resource
   # types inventory_locustfile.py uses for Batch D (kept as its own constant
   # here — see _DRILLDOWN_RESOURCE_TYPES in inventory_endpoint_load_locustfile.py).
   resources_paginated:
-    weight: 3
-    target_ops_per_user: 0.53
+    weight: 34
+    target_ops_per_user: 0.9
 
   # GET /org/inventory-summary, round-robin across `summary_types` above
   # (unfiltered only — no Batch B/C filter cycle).
   inventory_summary:
-    weight: 10
-    target_ops_per_user: 0.11
+    weight: 531
+    target_ops_per_user: 0.15
 
   # Light background pings on /auth/user + /org/resource-governance-summary
   # so they're not left completely idle, without materially affecting load.
+  # Target ~3 OPS total (intentionally light) — users_needed = 3 x ~7.5s avg.
   background:
-    weight: 1
-    target_ops_per_user: 0.05
+    weight: 22
+    target_ops_per_user: 0.2
 
   report_name: "endpoint_load"
   description: |
