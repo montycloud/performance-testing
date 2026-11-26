@@ -233,7 +233,7 @@ class ResourcesLoadUser(_BaseLoadUser):
         self._rr_index += 1
         self._get(
             "/org/resources",
-            f"[Inventory] resources ({cloud_provider})",
+            "[Inventory] resources",  # combined name — still round-robins CloudProvider per call, just not split in stats
             params={
                 "CloudProvider": cloud_provider,
                 "Filters": json.dumps({
@@ -286,7 +286,7 @@ class InventorySummaryLoadUser(_BaseLoadUser):
         self._rr_index += 1
         self._get(
             "/org/inventory-summary",
-            f"[Inventory] inventory-summary ({summary_type}, {cloud_provider})",
+            f"[Inventory] inventory-summary ({summary_type})",  # combined across providers — still round-robins CloudProvider per call
             params={"CloudProvider": cloud_provider, "SummaryType": summary_type},
         )
 
