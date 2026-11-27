@@ -8,6 +8,7 @@ MontyCloud API. Calls inside a batch fire in parallel; batches run in order.
 | Main journey | `scenarios/api/journey/locustfile.py` | `mcperf/api/journey.py`, `mcperf/api/pages/`, `mcperf/api/chat.py` | Home Page → WAFR → optional Health Events → optional AI Chat (WebSocket) |
 | Cost Dashboard | `scenarios/api/cost_dashboard/locustfile.py` | `mcperf/api/cost_dashboard.py` | 4 batches, Total Spend and Spend Trend once per date-range preset |
 | Inventory | `scenarios/api/inventory/locustfile.py` | `mcperf/api/inventory.py` | `/org/inventory-summary` by account, region and resource type |
+| Inventory endpoint load | `scenarios/api/inventory_endpoint_load/locustfile.py` | `mcperf/api/inventory_endpoint_load.py` | Independent, continuously-paced load per Inventory endpoint (`/org/resources`, `/org/resources_paginated`, `/org/inventory-summary`, `/org/resource-governance-summary`), each with its own `weight`/throughput target instead of one shared journey |
 | Day2SDK | `scenarios/api/day2sdk/locustfile.py` | `mcperf/api/day2sdk.py` | Day2SDK public API GETs, grouped by API tag, key-pair auth |
 
 Each scenario folder holds a one-call `locustfile.py` and its `config.yaml`.

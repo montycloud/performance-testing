@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MontyCloud API Performance Report</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+       background: #f0f2f5; color: #222; font-size: 14px; }
+header { background: #1a2b3c; color: #fff; padding: 24px 40px; }
+header h1 { font-size: 1.5rem; font-weight: 700; }
+header p  { opacity: .65; margin-top: 5px; font-size: .85rem; }
+main { max-width: 1500px; margin: 0 auto; padding: 32px 40px; }
+
+/* Summary cards */
+.cards { display: flex; flex-wrap: wrap; gap: 16px; margin-bottom: 40px; }
+.card  { background: #fff; border-radius: 10px; padding: 20px 24px;
+         box-shadow: 0 1px 6px rgba(0,0,0,.08); flex: 1 1 180px; min-width: 160px; }
+.card-label { font-size: .72rem; text-transform: uppercase; letter-spacing: .07em;
+              color: #888; margin-bottom: 8px; }
+.card-value { font-size: 1.9rem; font-weight: 700; color: #1a2b3c; line-height: 1; }
+.sub { font-size: .8rem; color: #666; margin-top: 6px; }
+
+/* Sections */
+section { margin-bottom: 48px; }
+.section-title {
+  display: flex; align-items: center; gap: 10px;
+  font-size: 1.05rem; font-weight: 700; color: #1a2b3c;
+  padding: 12px 18px; border-radius: 6px; margin-bottom: 14px;
+  border-left: 5px solid #2563eb; background: #e8edf4;
+}
+.section-title.wafr   { border-left-color: #7c3aed; background: #f0ebfd; }
+.section-title.auth   { border-left-color: #059669; background: #ecfdf5; }
+.section-title.health  { border-left-color: #ea580c; background: #fff7ed; }
+.section-title.chat    { border-left-color: #db2777; background: #fdf2f8; }
+.section-title.cost    { border-left-color: #16a34a; background: #f0fdf4; }
+.section-title.inventory { border-left-color: #d97706; background: #fffbeb; }
+.section-title.day2sdk { border-left-color: #4338ca; background: #eef2ff; }
+.badge { font-size: .72rem; background: rgba(0,0,0,.12);
+         border-radius: 12px; padding: 2px 9px; font-weight: 600; }
+
+/* Table */
+.table-wrap { overflow-x: auto; border-radius: 10px;
+              box-shadow: 0 1px 6px rgba(0,0,0,.08); }
+table { width: 100%; border-collapse: collapse; background: #fff;
+        font-size: .8rem; }
+thead tr { background: #1a2b3c; color: #fff; }
+thead th { padding: 10px 13px; text-align: left; font-weight: 600;
+           white-space: nowrap; }
+tbody tr:nth-child(odd)  { background: #f9fafb; }
+tbody tr:hover           { background: #eef2ff; }
+tbody td { padding: 9px 13px; border-bottom: 1px solid #e5e7eb;
+           white-space: nowrap; }
+td.name { white-space: normal; max-width: 360px; font-weight: 500; color: #1a2b3c; }
+td.fail { color: #dc2626; font-weight: 700; }
+
+.empty { color: #888; font-style: italic; padding: 12px 0; }
+footer { text-align: center; color: #aaa; font-size: .75rem; padding: 28px; }
+
+/* Throughput breakdown table */
+.tp-tbl { width: 100%; border-collapse: collapse; background: #fff;
+          border-radius: 10px; overflow: hidden;
+          box-shadow: 0 1px 6px rgba(0,0,0,.08); margin-bottom: 0; font-size: .85rem; }
+.tp-tbl thead tr { background: #0891b2; color: #fff; }
+.tp-tbl thead th { padding: 10px 16px; text-align: left; font-weight: 600; }
+.tp-tbl tbody td { padding: 10px 16px; border-bottom: 1px solid #e5e7eb; }
+.tp-tbl tbody tr:last-child td { font-weight: 700; background: #f0f9ff;
+                                  border-top: 2px solid #0891b2; border-bottom: none; }
+.tp-tbl tbody tr:hover:not(:last-child) { background: #f0f9ff; }
+.dot-auth   { color: #059669; font-size: 1.1em; }
+.dot-home   { color: #2563eb; font-size: 1.1em; }
+.dot-wafr   { color: #7c3aed; font-size: 1.1em; }
+.dot-health { color: #ea580c; font-size: 1.1em; }
+.dot-chat   { color: #db2777; font-size: 1.1em; }
+.dot-cost   { color: #16a34a; font-size: 1.1em; }
+.dot-inventory { color: #d97706; font-size: 1.1em; }
+.dot-day2sdk { color: #4338ca; font-size: 1.1em; }
+.dot-total  { color: #0891b2; font-size: 1.1em; }
+
+/* Critical issues section */
+.section-title.critical { border-left-color: #dc2626; background: #fef2f2; color: #991b1b; }
+.badge.critical { background: #dc2626; color: #fff; }
+tbody tr.warn td { background: #fffbeb; }
+tbody tr.crit td { background: #fef2f2; }
+tbody tr.warn td.fail, tbody tr.crit td.fail { color: #dc2626; font-weight: 700; }
+
+/* Test description banner */
+.test-desc { margin-top: 10px; font-size: 1rem; color: #93c5fd;
+             font-weight: 500; font-style: italic; white-space: pre-line; }
+
+/* Config table at the bottom */
+.config-tbl { width: 100%; border-collapse: collapse; background: #fff; font-size: .85rem; }
+.config-tbl td:first-child { font-weight: 600; color: #1a2b3c; background: #f8fafc;
+                              width: 240px; padding: 9px 16px;
+                              border-bottom: 1px solid #e5e7eb; }
+.config-tbl td:last-child { padding: 9px 16px; border-bottom: 1px solid #e5e7eb;
+                             font-family: 'SFMono-Regular', Consolas, monospace;
+                             color: #374151; }
+.config-tbl tr:last-child td { border-bottom: none; }
+</style>
+</head>
+<body>
+<header>
+  <h1>MontyCloud API Performance Report</h1>
+  <p>Generated: 2026-11-20 15:37:58 &nbsp;|&nbsp; Source: inventory_qa_stats.csv</p>
+  <div class="test-desc">Inventory API Performance Test
+Standalone flow: Signin -> Batch A (resources + Inventory Summary
+by-account/by-region/by-resourcetype + resource-governance-summary,
+parallel) -> [Batch B (filtered Inventory Summary) -> Batch C (unfiltered
+Inventory Summary + resource-governance-summary), once per configured
+filter_resource_types entry] -> Batch D (sequential resources_paginated
+drilldowns).
+</div>
+</header>
+<main>
+    <div class="cards"><div class="card"><div class="card-label">Total Requests</div><div class="card-value">56</div><div class="sub">failures: 0 (0.0 %)</div></div><div class="card"><div class="card-label">Test Duration</div><div class="card-value">1m 45s</div><div class="sub">total throughput: 0.53 req/s</div></div><div class="card"><div class="card-label">Throughput</div><div class="card-value">0.53 req/s</div><div class="sub">successful: 0.53 req/s</div></div><div class="card"><div class="card-label">Avg Response Time</div><div class="card-value">3,565.2 ms</div><div class="sub">across all endpoints</div></div><div class="card"><div class="card-label">Home Page</div><div class="card-value">0</div><div class="sub">avg 0.0 ms · 0.0 % fail</div></div><div class="card"><div class="card-label">WAFR Page</div><div class="card-value">0</div><div class="sub">avg 0.0 ms · 0.0 % fail</div></div><div class="card"><div class="card-label">Health Events</div><div class="card-value">0</div><div class="sub">avg 0.0 ms · 0.0 % fail</div></div><div class="card"><div class="card-label">Chat</div><div class="card-value">0</div><div class="sub">avg 0.0 ms · 0.0 % fail</div></div><div class="card"><div class="card-label">Cost Dashboard</div><div class="card-value">0</div><div class="sub">avg 0.0 ms · 0.0 % fail</div></div><div class="card"><div class="card-label">Inventory</div><div class="card-value">52</div><div class="sub">avg 3,592.3 ms · 0.0 % fail</div></div><div class="card"><div class="card-label">Day2SDK</div><div class="card-value">0</div><div class="sub">avg 0.0 ms · 0.0 % fail</div></div><div class="card"><div class="card-label">Session Continuations</div><div class="card-value">0</div><div class="sub">none this run</div></div></div>
+    <section><div class="section-title" style="border-left-color:#0891b2;background:#ecfeff;">Throughput Breakdown &nbsp;<span style='font-weight:400;font-size:.8rem;color:#666'>test duration: 1m 45s</span></div><div class='table-wrap'><table class='tp-tbl'><thead><tr><th>Section</th><th>Total Req</th><th>Successful</th><th>Failed</th><th>Req/s</th><th>Success Req/s</th><th>Avg Response</th></tr></thead><tbody><tr><td><span class='dot-auth'>●</span> Authentication</td><td>4</td><td>4</td><td>0 (0.0 %)</td><td>0.04</td><td>0.04</td><td>3,213 ms</td></tr><tr><td><span class='dot-home'>●</span> Home Page</td><td>0</td><td>0</td><td>0 (0.0 %)</td><td>0.00</td><td>0.00</td><td>0 ms</td></tr><tr><td><span class='dot-wafr'>●</span> WAFR Page</td><td>0</td><td>0</td><td>0 (0.0 %)</td><td>0.00</td><td>0.00</td><td>0 ms</td></tr><tr><td><span class='dot-health'>●</span> Health Events</td><td>0</td><td>0</td><td>0 (0.0 %)</td><td>0.00</td><td>0.00</td><td>0 ms</td></tr><tr><td><span class='dot-chat'>●</span> Chat</td><td>0</td><td>0</td><td>0 (0.0 %)</td><td>0.00</td><td>0.00</td><td>0 ms</td></tr><tr><td><span class='dot-cost'>●</span> Cost Dashboard</td><td>0</td><td>0</td><td>0 (0.0 %)</td><td>0.00</td><td>0.00</td><td>0 ms</td></tr><tr><td><span class='dot-inventory'>●</span> Inventory</td><td>52</td><td>52</td><td>0 (0.0 %)</td><td>0.49</td><td>0.49</td><td>3,592 ms</td></tr><tr><td><span class='dot-day2sdk'>●</span> Day2SDK</td><td>0</td><td>0</td><td>0 (0.0 %)</td><td>0.00</td><td>0.00</td><td>0 ms</td></tr><tr><td><span class='dot-total'>●</span> <strong>Total</strong></td><td><strong>56</strong></td><td><strong>56</strong></td><td><strong>0 (0.0 %)</strong></td><td><strong>0.53</strong></td><td><strong>0.53</strong></td><td><strong>3,565 ms</strong></td></tr></tbody></table></div><p style='font-size:.78rem;color:#666;margin-top:8px'>Req/s is averaged over the full test duration. Each section is only active during part of the run, so its actual load while active is higher.</p></section>
+  
+  <section><div class="section-title auth">Authentication <span class="badge">2 endpoints</span> &nbsp;·&nbsp; 4 reqs &nbsp;·&nbsp; avg 3,212.6 ms &nbsp;·&nbsp; 0.0 % failures</div><div class="table-wrap"><table><thead><tr><th>Endpoint</th><th># Requests</th><th># Failures</th><th>Failure %</th><th>Avg (ms)</th><th>Min (ms)</th><th>Max (ms)</th><th>Median (ms)</th><th>p90 (ms)</th><th>p95 (ms)</th><th>p99 (ms)</th><th>Avg Size (B)</th><th>Req/s</th><th>Fail/s</th></tr></thead><tbody><tr><td class='name'>[Auth] /auth/signin</td><td>2</td><td>0</td><td>0.0 %</td><td>4,771.0</td><td>1,656.8</td><td>7,885.2</td><td>1,700.0</td><td>7,900.0</td><td>7,900.0</td><td>7,900.0</td><td>5,247.5</td><td>0.0</td><td>0.0</td></tr><tr><td class='name'>[Auth] /auth/user</td><td>2</td><td>0</td><td>0.0 %</td><td>1,654.1</td><td>1,113.2</td><td>2,195.1</td><td>1,113.2</td><td>2,200.0</td><td>2,200.0</td><td>2,200.0</td><td>1,314.0</td><td>0.0</td><td>0.0</td></tr></tbody></table></div></section>
+  
+  
+  
+  
+  
+  <section><div class="section-title inventory">Inventory <span class="badge">12 endpoints</span> &nbsp;·&nbsp; 52 reqs &nbsp;·&nbsp; avg 3,592.3 ms &nbsp;·&nbsp; 0.0 % failures</div><div class="table-wrap"><table><thead><tr><th>Endpoint</th><th># Requests</th><th># Failures</th><th>Failure %</th><th>Avg (ms)</th><th>Min (ms)</th><th>Max (ms)</th><th>Median (ms)</th><th>p90 (ms)</th><th>p95 (ms)</th><th>p99 (ms)</th><th>Avg Size (B)</th><th>Req/s</th><th>Fail/s</th></tr></thead><tbody><tr><td class='name'>[Inventory] inventory-summary (by-account)</td><td>10</td><td>0</td><td>0.0 %</td><td>3,806.5</td><td>1,486.4</td><td>8,226.3</td><td>3,200.0</td><td>8,200.0</td><td>8,200.0</td><td>8,200.0</td><td>564.8</td><td>0.1</td><td>0.0</td></tr><tr><td class='name'>[Inventory] inventory-summary (by-region)</td><td>10</td><td>0</td><td>0.0 %</td><td>4,947.5</td><td>1,969.3</td><td>9,026.7</td><td>4,900.0</td><td>9,000.0</td><td>9,000.0</td><td>9,000.0</td><td>379.2</td><td>0.1</td><td>0.0</td></tr><tr><td class='name'>[Inventory] inventory-summary (by-resourcetype)</td><td>10</td><td>0</td><td>0.0 %</td><td>4,157.6</td><td>1,670.1</td><td>8,839.5</td><td>3,800.0</td><td>8,800.0</td><td>8,800.0</td><td>8,800.0</td><td>3,611.2</td><td>0.1</td><td>0.0</td></tr><tr><td class='name'>[Inventory] resource-governance-summary</td><td>6</td><td>0</td><td>0.0 %</td><td>4,760.0</td><td>3,342.2</td><td>8,158.6</td><td>3,900.0</td><td>8,200.0</td><td>8,200.0</td><td>8,200.0</td><td>107.0</td><td>0.1</td><td>0.0</td></tr><tr><td class='name'>[Inventory] resources</td><td>2</td><td>0</td><td>0.0 %</td><td>2,081.2</td><td>1,945.8</td><td>2,216.5</td><td>1,945.8</td><td>2,200.0</td><td>2,200.0</td><td>2,200.0</td><td>20,275.0</td><td>0.0</td><td>0.0</td></tr><tr><td class='name'>[Inventory] resources_paginated (Image)</td><td>2</td><td>0</td><td>0.0 %</td><td>3,509.7</td><td>1,258.6</td><td>5,760.8</td><td>1,300.0</td><td>5,800.0</td><td>5,800.0</td><td>5,800.0</td><td>13.0</td><td>0.0</td><td>0.0</td></tr><tr><td class='name'>[Inventory] resources_paginated (Instance)</td><td>2</td><td>0</td><td>0.0 %</td><td>3,122.1</td><td>780.2</td><td>5,464.0</td><td>780.2</td><td>5,500.0</td><td>5,500.0</td><td>5,500.0</td><td>13.0</td><td>0.0</td><td>0.0</td></tr><tr><td class='name'>[Inventory] resources_paginated (NotebookInstance)</td><td>2</td><td>0</td><td>0.0 %</td><td>1,319.7</td><td>1,213.0</td><td>1,426.5</td><td>1,213.0</td><td>1,400.0</td><td>1,400.0</td><td>1,400.0</td><td>13.0</td><td>0.0</td><td>0.0</td></tr><tr><td class='name'>[Inventory] resources_paginated (S3)</td><td>2</td><td>0</td><td>0.0 %</td><td>1,261.1</td><td>1,248.3</td><td>1,273.9</td><td>1,248.3</td><td>1,300.0</td><td>1,300.0</td><td>1,300.0</td><td>5,819.0</td><td>0.0</td><td>0.0</td></tr><tr><td class='name'>[Inventory] resources_paginated (Snapshot)</td><td>2</td><td>0</td><td>0.0 %</td><td>981.5</td><td>777.8</td><td>1,185.3</td><td>780.0</td><td>1,200.0</td><td>1,200.0</td><td>1,200.0</td><td>13.0</td><td>0.0</td><td>0.0</td></tr><tr><td class='name'>[Inventory] resources_paginated (Volume)</td><td>2</td><td>0</td><td>0.0 %</td><td>1,241.8</td><td>1,152.5</td><td>1,331.2</td><td>1,200.0</td><td>1,300.0</td><td>1,300.0</td><td>1,300.0</td><td>10,961.0</td><td>0.0</td><td>0.0</td></tr><tr><td class='name'>[Inventory] resources_paginated (Workspace)</td><td>2</td><td>0</td><td>0.0 %</td><td>1,043.8</td><td>843.3</td><td>1,244.2</td><td>843.3</td><td>1,200.0</td><td>1,200.0</td><td>1,200.0</td><td>13.0</td><td>0.0</td><td>0.0</td></tr></tbody></table></div></section>
+  
+  
+  <section><div class="section-title" style="border-left-color:#64748b;background:#f8fafc;color:#1a2b3c;">Test Configuration</div><div class="table-wrap"><table class="config-tbl"><tbody><tr><td>Description</td><td>Inventory API Performance Test<br>Standalone flow: Signin -> Batch A (resources + Inventory Summary<br>by-account/by-region/by-resourcetype + resource-governance-summary,<br>parallel) -> [Batch B (filtered Inventory Summary) -> Batch C (unfiltered<br>Inventory Summary + resource-governance-summary), once per configured<br>filter_resource_types entry] -> Batch D (sequential resources_paginated<br>drilldowns).<br></td></tr><tr><td>Base URL</td><td>https://stg1-api.montycloud.com</td></tr><tr><td>User Count</td><td>—</td></tr><tr><td>Run Mode</td><td>—</td></tr><tr><td>Run Time</td><td>—</td></tr><tr><td>Spawn Rate</td><td>—</td></tr><tr><td>Think Time (page transition)</td><td>—s – —s</td></tr><tr><td>Think Time (WAFR batches)</td><td>—s – —s</td></tr><tr><td>Timeout (per request)</td><td>40s</td></tr><tr><td>Users CSV</td><td>—</td></tr></tbody></table></div></section>
+</main>
+<footer>MontyCloud Performance Testing Framework &nbsp;·&nbsp; 2026-11-20 15:37:58</footer>
+</body>
+</html>

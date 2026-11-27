@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from mcperf.api.inventory import InventoryConfig
+from mcperf.api.inventory_endpoint_load import EndpointLoadConfig
 from mcperf.core.config import LoadProfile, ScenarioConfig, resolve_path
 
 REPO = Path(__file__).resolve().parents[2]
@@ -56,3 +57,26 @@ def test_shipped_inventory_config_parses():
     assert cfg.cloud_provider == "AWS"
     assert cfg.load.users_csv == (REPO / "scenarios/api/users.csv").resolve()
     assert cfg.report.report_name == "inventory"
+
+
+def test_shipped_endpoint_load_config_parses():
+    cfg = EndpointLoadConfig.load_file(REPO / "scenarios/api/inventory_endpoint_load/config.yaml")
+    assert cfg.cloud_providers == ("AWS", "Azure")
+    assert cfg.load.run_mode == "timed"
+    assert len(cfg.drilldown_resource_types) == 7
+    assert cfg.resources.weight == 30
+    assert cfg.resources_paginated.target_ops_per_user == 0.9
+    assert cfg.inventory_summary.weight == 46
+    assert cfg.governance.weight == 3
+    assert cfg.report.report_name == "endpoint_load"
+
+
+def test_endpoint_load_config_requires_drilldown_types(tmp_path):
+    path = write(
+        tmp_path,
+        "api:\n  base_url: https://example.test/\n"
+        "load:\n  users_csv: ./u.csv\n"
+        "endpoint_load:\n  cloud_provider: AWS\n",
+    )
+    with pytest.raises(ValueError, match="drilldown_resource_types"):
+        EndpointLoadConfig.load_file(path)

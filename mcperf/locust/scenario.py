@@ -1,11 +1,13 @@
-"""Wire a MontyCloudUser subclass into a Locust run.
+"""Wire one or more MontyCloudUser subclasses into a Locust run.
 
 register_scenario() is the only call a locustfile needs. It:
   1. adds --mc-config (env MCPERF_CONFIG) so sweeps can point at another config
      file without rewriting one in place, --env to pick a MontyCloud
      environment (overrides api.base_url), and --report-name;
   2. loads and validates the config on Locust's init event, then configures the
-     user class;
+     user class(es) — pass a list of classes when a locustfile defines several
+     independently-weighted User classes sharing one config (e.g. one class
+     per endpoint, each with its own `weight`/`wait_time`);
   3. in single_journey mode, quits once every user has finished;
   4. after the run, writes the custom HTML report next to the --csv output.
 """
@@ -13,7 +15,7 @@ register_scenario() is the only call a locustfile needs. It:
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 import gevent
@@ -30,11 +32,27 @@ logger = logging.getLogger(__name__)
 _FINISHED_STATES = (STATE_STOPPING, STATE_STOPPED, STATE_CLEANUP)
 
 
+def _as_classes(
+    user_cls: type[MontyCloudUser] | Sequence[type[MontyCloudUser]],
+) -> list[type[MontyCloudUser]]:
+    """Normalize register_scenario()'s *user_cls* to a list: a bare class becomes
+    a single-item list, a list/tuple of classes passes through unchanged."""
+    return [user_cls] if isinstance(user_cls, type) else list(user_cls)
+
+
 def register_scenario(
-    user_cls: type[MontyCloudUser],
+    user_cls: type[MontyCloudUser] | Sequence[type[MontyCloudUser]],
     default_config: Path,
     config_cls: type[ScenarioConfig] = ScenarioConfig,
 ) -> None:
+    """Wire one locustfile. *user_cls* is usually a single class; pass a list/tuple
+    when a locustfile defines several independently-weighted User classes that
+    should share the same config file (e.g. one class per endpoint) — every
+    class in the sequence is configure()'d from the same loaded config.
+    """
+    user_classes = _as_classes(user_cls)
+    primary = user_classes[0]
+
     @events.init_command_line_parser.add_listener
     def _add_args(parser, **_kwargs) -> None:
         parser.add_argument(
@@ -65,11 +83,12 @@ def register_scenario(
         cfg = config_cls.load_file(path).with_overrides(env=env, report_name=getattr(opts, "report_name", None))
         if env and environments.is_production(env):
             logger.warning("--env %s is PRODUCTION (%s).", env, cfg.api.base_url)
-        user_cls.configure(cfg)
+        for cls in user_classes:
+            cls.configure(cfg)
         logger.info("Loaded scenario config %s → %s", path, cfg.api.base_url)
 
-    install_single_journey_watchdog(lambda: user_cls.cfg is not None and user_cls.cfg.load.is_single_journey)
-    install_report_on_stop(lambda: user_cls.cfg, user_cls.report_extras)
+    install_single_journey_watchdog(lambda: primary.cfg is not None and primary.cfg.load.is_single_journey)
+    install_report_on_stop(lambda: primary.cfg, primary.report_extras)
 
 
 def install_single_journey_watchdog(is_single_journey: Callable[[], bool]) -> None:

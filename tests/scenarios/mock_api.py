@@ -27,6 +27,9 @@ BODIES: dict[str, dict[str, Any]] = {
     "/health/api/v1/events/events": {"HealthEvents": [{"Id": "ev-1"}]},
     "/day2/api/v1/tenants": {"Tenants": [{"ID": "t1"}, {"ID": "t2"}]},
     "/day2/api/v1/organizations": {"Organizations": [{"ID": "o1"}]},
+    "/org/resources": {"Resources": [{"ResourceId": "res-1"}]},
+    "/org/resource-governance-summary": {"Summary": {}},
+    "/org/resources_paginated": {"Resources": [{"ResourceId": "res-1"}], "NextOffset": None},
 }
 SUFFIX_BODIES: dict[str, dict[str, Any]] = {
     "/assessments": {"Assessments": [{"ID": "a1"}]},
@@ -78,11 +81,19 @@ class _Handler(BaseHTTPRequestHandler):
         pass
 
 
+class _Server(ThreadingHTTPServer):
+    # Default is 5; Inventory's largest batch (Batch A) fires 5 parallel GETs
+    # per user, so a handful of concurrent users can exceed the listen()
+    # backlog and intermittently reset/truncate connections. Scenarios only
+    # keep growing their batch sizes, so give plenty of headroom.
+    request_queue_size = 128
+
+
 @contextmanager
 def mock_api() -> Iterator[tuple[str, Counter]]:
     """Yields (base_url, hit counter keyed by (method, path))."""
     _Handler.hits = Counter()
-    server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    server = _Server(("127.0.0.1", 0), _Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     try:
         yield f"http://127.0.0.1:{server.server_address[1]}", _Handler.hits

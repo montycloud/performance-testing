@@ -28,14 +28,61 @@ report:
   report_name: "inventory"
   description: |
     Inventory API Performance Test
-    Standalone flow: Signin -> Inventory Summary (by-account + by-region +
-    by-resourcetype, parallel).
+    Standalone flow: Signin -> Batch A (resources + Inventory Summary
+    by-account/by-region/by-resourcetype + resource-governance-summary,
+    parallel) -> [Batch B (filtered Inventory Summary) -> Batch C (unfiltered
+    Inventory Summary + resource-governance-summary), once per configured
+    filter_resource_types entry] -> Batch D (sequential resources_paginated
+    drilldowns).
 
 inventory:
-  # Sent as CloudProvider on every /org/inventory-summary call.
+  # Sent as CloudProvider on every call below.
   cloud_provider: "AWS"
-  # SummaryType values fired in parallel in the single batch.
+
+  # Batch A — initial page load: GET /org/resources + the 3 summary calls +
+  # GET /org/resource-governance-summary, all in parallel. Set false to skip
+  # straight to the summary trio only (pre-Batch-A behavior).
+  batch_a_enabled: true
+  # Sent as Filters.ResourceType on the Batch A GET /org/resources call.
+  batch_a_org_resource_type: "CustomerAccount"
+
+  # SummaryType values fired in parallel in Batch A/B/C.
   summary_types:
     - "by-account"
     - "by-region"
     - "by-resourcetype"
+
+  # Batch B/C — filter apply/clear cycle. One (Batch B: filtered summary trio,
+  # Batch C: unfiltered summary trio + governance-summary) pair runs per entry
+  # here, in order, every iteration. Empty/omitted: Batch B/C is skipped
+  # entirely and the journey goes straight from Batch A to Batch D.
+  filter_resource_types:
+    - "API"
+    - "Snapshot"
+
+  # Batch D — sequential GET /org/resources_paginated drilldowns, one call per
+  # entry, in order, with a randomized pause (drilldown_think_time_*) between
+  # each. `type` is required; `limit`, `offset` and `cloud_provider` are
+  # optional per entry (sent only when present).
+  drilldown_resource_types:
+    - type: "Instance"
+      limit: 10
+    - type: "Image"
+      limit: 10
+    - type: "Workspace"
+      cloud_provider: "AWS"
+      offset: 0
+      limit: 100
+    - type: "NotebookInstance"
+      cloud_provider: "AWS"
+      offset: 0
+      limit: 100
+    - type: "Volume"
+      limit: 10
+    - type: "Snapshot"
+      limit: 10
+    - type: "S3"
+      limit: 10
+  # Pause (seconds) between each Batch D drilldown call.
+  drilldown_think_time_min: 2
+  drilldown_think_time_max: 10

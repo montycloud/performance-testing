@@ -22,11 +22,25 @@ def assert_clean(proc, rows):
 
 def test_inventory(tmp_path):
     with mock_api() as (url, hits):
-        proc, rows = run_scenario("inventory", tmp_path, url, {"load": {"iterations": 2}}, users=2)
+        proc, rows = run_scenario(
+            "inventory", tmp_path, url,
+            {"load": {"iterations": 2}, "inventory": {"drilldown_think_time_min": 0, "drilldown_think_time_max": 0}},
+            users=2,
+        )
     assert_clean(proc, rows)
-    # 2 users × 2 iterations × 3 summary types; one sign-in per user.
+    # Shipped config: 3 summary_types, 2 filter_resource_types, 7 drilldown_resource_types,
+    # batch_a_enabled=true. Per iteration, each summary type fires once in Batch A plus
+    # once in Batch B and once in Batch C per filter_resource_types entry (2 filters ->
+    # 1 + 2*(1+1) = 5 times/iteration). 2 users x 2 iterations x 5 = 20.
     for summary_type in ("by-account", "by-region", "by-resourcetype"):
-        assert count(rows, f"[Inventory] inventory-summary ({summary_type})") == 4
+        assert count(rows, f"[Inventory] inventory-summary ({summary_type})") == 20
+    # Batch A only -> 1/iteration -> 2 users x 2 iterations = 4.
+    assert count(rows, "[Inventory] resources") == 4
+    # Batch A (1) + Batch C once per filter (2) = 3/iteration -> 2 users x 2 iterations x 3 = 12.
+    assert count(rows, "[Inventory] resource-governance-summary") == 12
+    # Batch D fires once per drilldown type per iteration -> 2 users x 2 iterations = 4 each.
+    for resource_type in ("Instance", "Image", "Workspace", "NotebookInstance", "Volume", "Snapshot", "S3"):
+        assert count(rows, f"[Inventory] resources_paginated ({resource_type})") == 4
     assert count(rows, "[Auth] /auth/signin") == 2
     reports = list(tmp_path.glob("custom_inventory_*.html"))
     assert len(reports) == 1

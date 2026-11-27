@@ -1,0 +1,98 @@
+# Inventory endpoint-targeted load test — scenarios/api/inventory_endpoint_load/locustfile.py
+# Relative paths resolve against this file's directory.
+#
+# Unlike scenarios/api/inventory (one sequential page journey per user),
+# this paces /org/resources, /org/resources_paginated, /org/inventory-summary
+# and /org/resource-governance-summary independently so each endpoint's load
+# can be tuned toward its own target instead of being capped by the slowest
+# step in a shared journey. See mcperf/api/inventory_endpoint_load.py.
+
+api:
+  base_url: "https://stg1-api.montycloud.com"
+  mc_debug_mode: true
+  timeout_seconds: 40
+
+load:
+  users_csv: "../users.csv"
+  user_count: 50
+  # timed: every user loops its endpoint continuously until --run-time.
+  # (single_journey doesn't apply here — there is no single "journey" to finish.)
+  run_mode: "timed"
+
+report:
+  report_name: "endpoint_load"
+  description: |
+    Inventory Endpoint-Targeted Load Test
+    Independent, continuously-looping load per endpoint: /org/resources,
+    /org/resources_paginated, /org/inventory-summary,
+    /org/resource-governance-summary. GET /auth/user fires once per user at
+    sign-in (shared mcperf.locust.http.signin), not looped separately.
+
+endpoint_load:
+  cloud_provider: "AWS"
+  # Cloud providers round-robinned by the resources and inventory-summary
+  # classes — per captured real traffic, the page fires one call per
+  # configured provider. /org/resources_paginated's captured calls had no
+  # CloudProvider param for non-offset drilldown types, so it's left out of
+  # that class's round-robin (see drilldown_resource_types below).
+  cloud_providers:
+    - "AWS"
+    - "Azure"
+  batch_a_org_resource_type: "CustomerAccount"
+  summary_types:
+    - "by-account"
+    - "by-region"
+    - "by-resourcetype"
+
+  # Round-robinned by ResourcesPaginatedLoadUser. Kept as its own list here
+  # (not shared/imported from scenarios/api/inventory/config.yaml) so this
+  # scenario's config stays self-contained and independently tunable; the
+  # DrilldownResourceType dataclass/parser *is* shared (see
+  # mcperf/api/inventory_endpoint_load.py), only the data is duplicated.
+  drilldown_resource_types:
+    - type: "Instance"
+      limit: 10
+    - type: "Image"
+      limit: 10
+    - type: "Workspace"
+      cloud_provider: "AWS"
+      offset: 0
+      limit: 100
+    - type: "NotebookInstance"
+      cloud_provider: "AWS"
+      offset: 0
+      limit: 100
+    - type: "Volume"
+      limit: 10
+    - type: "Snapshot"
+      limit: 10
+    - type: "S3"
+      limit: 10
+
+  # weight/target_ops_per_user starting points, calibrated from:
+  #   - weight: relative share of --users, set to mirror the Prod backend-OPS
+  #     targets per endpoint (resources/paginated/summary/governance
+  #     ~= 30/24/46/3) — these OPS figures are backend (Lambda invocation)
+  #     rates, observed achievable with as few as ~5 concurrent Locust users,
+  #     NOT a literal Locust requests/second figure to scale --users toward.
+  #   - target_ops_per_user: each endpoint's measured 1/avg_response_time
+  #     ceiling (avg RT: resources ~0.98s, resources_paginated ~1.09s avg
+  #     across drilldown types, inventory-summary ~8.72s avg across summary
+  #     types, resource-governance-summary ~7.2s), set so constant_throughput
+  #     never throttles a user below what the backend can sustain alone.
+  #
+  # Start small (e.g. --users 5-20) and compare against real backend
+  # telemetry, not just Locust's own req/s, before scaling --users up —
+  # re-calibrate weight/target_ops_per_user from what you observe.
+  resources:
+    weight: 30
+    target_ops_per_user: 1.0
+  resources_paginated:
+    weight: 24
+    target_ops_per_user: 0.9
+  inventory_summary:
+    weight: 46
+    target_ops_per_user: 0.11
+  governance:
+    weight: 3
+    target_ops_per_user: 0.14

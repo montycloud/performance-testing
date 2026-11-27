@@ -7,6 +7,7 @@ ENVIRONMENTS: dict[str, str] = {
     "dev-eu": "https://dev-eu-api.montycloud.com",
     "eu": "https://eu-api.montycloud.com",
     "int1": "https://int1-api.montycloud.com",
+    "qa": "https://qa-us-api.montycloud.com",
     "stg1": "https://stg1-api.montycloud.com",
     "prd01": "https://api.montycloud.com",
 }
